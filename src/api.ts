@@ -13,9 +13,9 @@ import type {
 
 const defaultAiConfig: AiProviderConfig = {
   id: "default",
-  name: "OpenAI Compatible",
-  baseUrl: "https://api.openai.com/v1",
-  model: "gpt-4.1-mini",
+  name: "DeepSeek",
+  baseUrl: "https://api.deepseek.com",
+  model: "deepseek-v4-flash",
   apiKeySecretRef: "shellpro-ai-default",
   contextMode: "recentLines",
   recentLineLimit: 200,
@@ -23,15 +23,14 @@ const defaultAiConfig: AiProviderConfig = {
 };
 
 function isTauriRuntime() {
-  if (typeof window === "undefined" || window.location.protocol.startsWith("http")) {
+  if (typeof window === "undefined") {
     return false;
   }
+  const tauriInternals = window.__TAURI_INTERNALS__;
   return (
-    "__TAURI_INTERNALS__" in window &&
-    window.__TAURI_INTERNALS__ !== undefined &&
-    typeof window.__TAURI_INTERNALS__ === "object" &&
-    window.__TAURI_INTERNALS__ !== null &&
-    "invoke" in window.__TAURI_INTERNALS__
+    typeof tauriInternals === "object" &&
+    tauriInternals !== null &&
+    "invoke" in tauriInternals
   );
 }
 
@@ -74,6 +73,40 @@ function redact(text: string) {
     .replace(/(password|passwd|pwd)\s*[:=]\s*[^\s]+/gi, "$1=[REDACTED]")
     .replace(/(api[_-]?key|token|secret)\s*[:=]\s*[A-Za-z0-9_\-./+=]{8,}/gi, "$1=[REDACTED]")
     .replace(/(authorization:\s*bearer\s+)[A-Za-z0-9_\-./+=]+/gi, "$1[REDACTED]");
+}
+
+function collapseBlankLines(text: string) {
+  const lines = text.split("\n");
+  const output: string[] = [];
+  let blankCount = 0;
+
+  for (const line of lines) {
+    if (!line.trim()) {
+      blankCount += 1;
+      if (blankCount <= 2) {
+        output.push("");
+      }
+      continue;
+    }
+
+    blankCount = 0;
+    output.push(line);
+  }
+
+  return output.join("\n").trimEnd();
+}
+
+function sanitizeTerminalContext(text: string) {
+  const withoutAnsi = text
+    .replace(/\x1B\[[0-?]*[ -/]*[Hf]/g, "\n")
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "")
+    .replace(/\x1B[@-Z\\-_]/g, "");
+  return collapseBlankLines(
+    withoutAnsi
+      .replace(/\r/g, "\n")
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ""),
+  );
 }
 
 function mockProfiles(): ConnectionProfile[] {
@@ -141,7 +174,7 @@ async function mockInvoke<T>(
         apiKeySecretRef: "shellpro-ai-default",
       } as T;
     case "preview_ai_context": {
-      const content = redact(String(args.context ?? ""));
+      const content = redact(sanitizeTerminalContext(String(args.context ?? "")));
       return {
         originalChars: String(args.context ?? "").length,
         redactedChars: content.length,

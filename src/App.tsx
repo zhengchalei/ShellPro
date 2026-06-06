@@ -28,7 +28,7 @@ import {
   Wand2,
   X,
 } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { shellProApi } from "./api";
 import "./App.css";
 import { Locale, useI18n } from "./i18n";
@@ -104,6 +104,7 @@ function App() {
   const [searchText, setSearchText] = useState("");
   const [secretDraft, setSecretDraft] = useState("");
   const [aiKeyDraft, setAiKeyDraft] = useState("");
+  const contextPreviewRef = useRef<HTMLPreElement | null>(null);
   const [aiDraft, setAiDraft] = useState<{
     name: string;
     baseUrl: string;
@@ -112,9 +113,9 @@ function App() {
     recentLineLimit: number;
     redactSecrets: boolean;
   }>({
-    name: "OpenAI Compatible",
-    baseUrl: "https://api.openai.com/v1",
-    model: "gpt-4.1-mini",
+    name: "DeepSeek",
+    baseUrl: "https://api.deepseek.com",
+    model: "deepseek-v4-flash",
     contextMode: "recentLines",
     recentLineLimit: 200,
     redactSecrets: true,
@@ -196,6 +197,14 @@ function App() {
       .then((preview) => setContextPreview(preview.content))
       .catch(() => setContextPreview(recentLines));
   }, [activeBuffer, manualSelection, selectedContextMode]);
+
+  useEffect(() => {
+    const preview = contextPreviewRef.current;
+    if (!preview) {
+      return;
+    }
+    preview.scrollTop = preview.scrollHeight;
+  }, [contextPreview, isInspectorVisible]);
 
   const updateSessionStatus = useCallback(
     (sessionId: string, status: TerminalSession["status"]) => {
@@ -897,7 +906,9 @@ function App() {
               <ShieldAlert size={16} />
               {t("ai.contextPreview")}
             </div>
-            <pre>{contextPreview || t("ai.openTerminalContext")}</pre>
+            <pre ref={contextPreviewRef}>
+              {contextPreview || t("ai.openTerminalContext")}
+            </pre>
           </div>
 
           <div className="suggestion-list">

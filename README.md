@@ -3,6 +3,10 @@
 ShellPro is a cross-platform terminal, SSH profile manager, and safe AI command
 advisor. It is built with Tauri 2, Rust, React, TypeScript, and xterm.js.
 
+## Preview
+
+![ShellPro preview](docs/shellpro-preview.png)
+
 ## Current MVP
 
 - Apple-inspired desktop workspace with sidebar, toolbar, terminal area, and AI inspector.
@@ -10,7 +14,7 @@ advisor. It is built with Tauri 2, Rust, React, TypeScript, and xterm.js.
 - SSH sessions launched through the system `ssh` command with profile settings.
 - SQLite-backed SSH profile storage.
 - System keychain-backed secret storage for AI keys and profile secrets.
-- AI command suggestion flow with context redaction, local risk classification, and manual-only execution.
+- DeepSeek-backed AI command suggestion flow with context redaction, local risk classification, and manual-only execution.
 - Browser preview fallback for UI QA outside the Tauri runtime.
 
 ## Safety Model
@@ -36,7 +40,6 @@ npm run check
 
 ## Notes
 
-The AI provider settings are wired into secure storage and the UI flow. The
-current MVP uses a local suggestion engine so the app is usable without an API
-key; a real OpenAI-compatible HTTP provider can be added behind the same
-structured command suggestion interface.
+The default AI provider is DeepSeek at `https://api.deepseek.com` using the
+`deepseek-v4-flash` model. API keys are stored in the system keychain and are
+never written to the project files.
