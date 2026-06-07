@@ -4,13 +4,19 @@ import {
   ChevronDown,
   Copy,
   Download,
+  FilePlus2,
   FileKey2,
+  FileText,
+  Folder,
+  FolderOpen,
+  FolderPlus,
   FolderTree,
   Laptop,
   PanelRight,
   Loader2,
   MoreHorizontal,
   PanelLeft,
+  Pencil,
   Play,
   Plus,
   RefreshCcw,
@@ -25,10 +31,21 @@ import {
   Star,
   TerminalSquare,
   Trash2,
+  UploadCloud,
   Wand2,
   X,
 } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChangeEvent,
+  DragEvent,
+  FormEvent,
+  MouseEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { shellProApi } from "./api";
 import "./App.css";
 import { Locale, useI18n } from "./i18n";
@@ -42,10 +59,19 @@ import type {
   ContextMode,
   RiskLevel,
   TerminalSession,
+  WorkspaceFileEntry,
+  WorkspaceFileKind,
+  WorkspaceFilePreview,
 } from "./types";
 
 type ViewMode = "workspace" | "connections" | "settings";
 type SuggestionState = "idle" | "loading" | "empty" | "ready";
+type FileContextMenuState = {
+  x: number;
+  y: number;
+  entry: WorkspaceFileEntry | null;
+  parentPath: string | null;
+} | null;
 
 const emptyProfile: ConnectionProfileInput = {
   name: "",
@@ -85,6 +111,74 @@ function textToTags(value: string) {
     .filter(Boolean);
 }
 
+function flattenFileEntries(entries: WorkspaceFileEntry[]) {
+  const output: WorkspaceFileEntry[] = [];
+
+  const visit = (entry: WorkspaceFileEntry) => {
+    output.push(entry);
+    entry.children?.forEach(visit);
+  };
+
+  entries.forEach(visit);
+  return output;
+}
+
+function formatFileSize(size?: number | null) {
+  if (size === null || size === undefined) {
+    return "";
+  }
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  const units = ["KB", "MB", "GB"];
+  let value = size / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function formatFileDate(value?: string | null) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleString();
+}
+
+function parentForFileAction(entry: WorkspaceFileEntry | null, fallback: string | null) {
+  if (!entry) {
+    return fallback;
+  }
+  return entry.kind === "directory" ? entry.path : entry.parentPath ?? fallback;
+}
+
+async function filesToUploads(
+  parentPath: string | null,
+  files: File[],
+  onStatus: (message: string) => void,
+) {
+  const paths = files
+    .map((file) => (file as File & { path?: string }).path)
+    .filter((path): path is string => Boolean(path));
+
+  if (paths.length === files.length && paths.length > 0) {
+    await shellProApi.uploadWorkspaceFiles(parentPath, paths);
+    return;
+  }
+
+  for (const file of files) {
+    const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+    await shellProApi.writeWorkspaceFile(parentPath, file.name, bytes);
+    onStatus(`${file.name} uploaded`);
+  }
+}
+
 function authTypeLabel(
   authType: ConnectionProfile["authType"],
   t: (key: string, values?: Record<string, string | number>) => string,
@@ -106,6 +200,18 @@ function App() {
     {},
   );
   const [aiConfig, setAiConfig] = useState<AiProviderConfig | null>(null);
+  const [workspaceRoot, setWorkspaceRoot] = useState("");
+  const [fileEntries, setFileEntries] = useState<WorkspaceFileEntry[]>([]);
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+  const [filePreview, setFilePreview] = useState<WorkspaceFilePreview | null>(null);
+  const [expandedDirPaths, setExpandedDirPaths] = useState<Record<string, boolean>>(
+    {},
+  );
+  const [fileContextMenu, setFileContextMenu] =
+    useState<FileContextMenuState>(null);
+  const [fileDropTarget, setFileDropTarget] = useState<string | null>(null);
+  const [pendingUploadParent, setPendingUploadParent] = useState<string | null>(null);
+  const [isFileBusy, setIsFileBusy] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("workspace");
   const [profileDraft, setProfileDraft] =
     useState<ConnectionProfileInput>(createEmptyProfile);
@@ -133,6 +239,7 @@ function App() {
   const [secretDraft, setSecretDraft] = useState("");
   const [aiKeyDraft, setAiKeyDraft] = useState("");
   const contextPreviewRef = useRef<HTMLPreElement | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const aiRequestTokensRef = useRef<Record<string, number>>({});
   const activeSessionIdRef = useRef<string | null>(null);
   const [aiDraft, setAiDraft] = useState<{
@@ -166,6 +273,10 @@ function App() {
   const activeSessionLabel = activeSession
     ? `${activeSession.title} · ${t(`session.${activeSession.status}`)}`
     : t("app.noActiveSession");
+  const allFileEntries = useMemo(
+    () => flattenFileEntries(fileEntries),
+    [fileEntries],
+  );
   const filteredProfiles = profiles.filter((profile) => {
     const needle = searchText.trim().toLowerCase();
     if (!needle) {
@@ -206,6 +317,7 @@ function App() {
       const bootstrap = await shellProApi.bootstrap();
       setProfiles(bootstrap.profiles);
       setAiConfig(bootstrap.aiConfig);
+      setWorkspaceRoot(bootstrap.workspaceRoot || bootstrap.cwd);
       setAiDraft({
         name: bootstrap.aiConfig.name,
         baseUrl: bootstrap.aiConfig.baseUrl,
@@ -220,9 +332,31 @@ function App() {
     }
   }, []);
 
+  const refreshFileTree = useCallback(async () => {
+    try {
+      const tree = await shellProApi.listWorkspaceFiles();
+      setWorkspaceRoot(tree.root);
+      setFileEntries(tree.entries);
+      setExpandedDirPaths((current) => {
+        if (Object.keys(current).length > 0) {
+          return current;
+        }
+        return tree.entries.reduce<Record<string, boolean>>((next, entry) => {
+          if (entry.kind === "directory") {
+            next[entry.path] = true;
+          }
+          return next;
+        }, {});
+      });
+    } catch (error) {
+      setStatusMessage(String(error));
+    }
+  }, []);
+
   useEffect(() => {
     void refreshBootstrap();
-  }, [refreshBootstrap]);
+    void refreshFileTree();
+  }, [refreshBootstrap, refreshFileTree]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -267,6 +401,58 @@ function App() {
     window.addEventListener("keydown", handleEscape);
     return () => window.removeEventListener("keydown", handleEscape);
   }, [isProfileDialogOpen]);
+
+  useEffect(() => {
+    if (!selectedFilePath) {
+      setFilePreview(null);
+      return;
+    }
+
+    const entry = allFileEntries.find((item) => item.path === selectedFilePath);
+    if (!entry) {
+      setSelectedFilePath(null);
+      setFilePreview(null);
+      return;
+    }
+
+    let cancelled = false;
+    void shellProApi
+      .previewWorkspaceFile(entry.path)
+      .then((preview) => {
+        if (!cancelled) {
+          setFilePreview(preview);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setStatusMessage(String(error));
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [allFileEntries, selectedFilePath]);
+
+  useEffect(() => {
+    if (!fileContextMenu) {
+      return;
+    }
+
+    const closeMenu = () => setFileContextMenu(null);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeMenu();
+      }
+    };
+
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [fileContextMenu]);
 
   const updateSessionStatus = useCallback(
     (sessionId: string, status: TerminalSession["status"]) => {
@@ -552,6 +738,137 @@ function App() {
     }
   }
 
+  function selectFileEntry(entry: WorkspaceFileEntry) {
+    setSelectedFilePath(entry.path);
+    if (entry.kind === "directory") {
+      setExpandedDirPaths((current) => ({
+        ...current,
+        [entry.path]: !current[entry.path],
+      }));
+    }
+  }
+
+  function showFileContextMenu(
+    event: MouseEvent,
+    entry: WorkspaceFileEntry | null,
+    parentPath: string | null,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    setFileContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      entry,
+      parentPath,
+    });
+  }
+
+  async function createWorkspaceFile(
+    target: WorkspaceFileEntry | null,
+    kind: WorkspaceFileKind,
+  ) {
+    const parentPath = parentForFileAction(target, workspaceRoot || null);
+    const defaultName = kind === "directory" ? "new-folder" : "new-file.txt";
+    const name = window.prompt(t("files.namePrompt"), defaultName)?.trim();
+    if (!name) {
+      return;
+    }
+
+    setIsFileBusy(true);
+    try {
+      await shellProApi.createWorkspaceFile(parentPath, name, kind);
+      if (parentPath) {
+        setExpandedDirPaths((current) => ({ ...current, [parentPath]: true }));
+      }
+      await refreshFileTree();
+      setStatusMessage(t("files.created", { name }));
+    } catch (error) {
+      setStatusMessage(String(error));
+    } finally {
+      setIsFileBusy(false);
+    }
+  }
+
+  async function deleteWorkspaceFile(entry: WorkspaceFileEntry) {
+    if (!window.confirm(t("files.deleteConfirm", { name: entry.name }))) {
+      return;
+    }
+
+    setIsFileBusy(true);
+    try {
+      await shellProApi.deleteWorkspaceFile(entry.path);
+      if (selectedFilePath === entry.path) {
+        setSelectedFilePath(null);
+        setFilePreview(null);
+      }
+      await refreshFileTree();
+      setStatusMessage(t("files.deleted", { name: entry.name }));
+    } catch (error) {
+      setStatusMessage(String(error));
+    } finally {
+      setIsFileBusy(false);
+    }
+  }
+
+  async function renameWorkspaceFile(entry: WorkspaceFileEntry) {
+    const newName = window.prompt(t("files.renamePrompt"), entry.name)?.trim();
+    if (!newName || newName === entry.name) {
+      return;
+    }
+
+    setIsFileBusy(true);
+    try {
+      const renamed = await shellProApi.renameWorkspaceFile(entry.path, newName);
+      if (selectedFilePath === entry.path) {
+        setSelectedFilePath(renamed.path);
+      }
+      await refreshFileTree();
+      setStatusMessage(t("files.renamed", { name: newName }));
+    } catch (error) {
+      setStatusMessage(String(error));
+    } finally {
+      setIsFileBusy(false);
+    }
+  }
+
+  function openUploadPicker(parentPath: string | null) {
+    setPendingUploadParent(parentPath);
+    uploadInputRef.current?.click();
+  }
+
+  async function uploadFiles(parentPath: string | null, files: File[]) {
+    if (files.length === 0) {
+      return;
+    }
+
+    setIsFileBusy(true);
+    try {
+      await filesToUploads(parentPath, files, setStatusMessage);
+      if (parentPath) {
+        setExpandedDirPaths((current) => ({ ...current, [parentPath]: true }));
+      }
+      await refreshFileTree();
+      setStatusMessage(t("files.uploaded", { count: files.length }));
+    } catch (error) {
+      setStatusMessage(String(error));
+    } finally {
+      setIsFileBusy(false);
+    }
+  }
+
+  function handleUploadInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+    void uploadFiles(pendingUploadParent || workspaceRoot || null, files);
+  }
+
+  function handleFileDrop(event: DragEvent, parentPath: string | null) {
+    event.preventDefault();
+    event.stopPropagation();
+    setFileDropTarget(null);
+    void uploadFiles(parentPath || workspaceRoot || null, Array.from(event.dataTransfer.files));
+  }
+
   return (
     <div
       className={`app-shell ${!isSidebarVisible ? "sidebar-hidden" : ""} ${
@@ -661,6 +978,43 @@ function App() {
             </button>
           </nav>
 
+          <FileExplorer
+            entries={fileEntries}
+            workspaceRoot={workspaceRoot}
+            selectedPath={selectedFilePath}
+            preview={filePreview}
+            expandedDirPaths={expandedDirPaths}
+            dropTargetPath={fileDropTarget}
+            isBusy={isFileBusy}
+            onSelect={selectFileEntry}
+            onToggleDirectory={(path) =>
+              setExpandedDirPaths((current) => ({
+                ...current,
+                [path]: !current[path],
+              }))
+            }
+            onContextMenu={showFileContextMenu}
+            onCreate={createWorkspaceFile}
+            onUpload={openUploadPicker}
+            onDragOver={(event, parentPath) => {
+              event.preventDefault();
+              setFileDropTarget(parentPath || workspaceRoot || null);
+            }}
+            onDragLeave={() => setFileDropTarget(null)}
+            onDrop={handleFileDrop}
+            t={t}
+          />
+
+          <input
+            ref={uploadInputRef}
+            className="visually-hidden"
+            type="file"
+            multiple
+            tabIndex={-1}
+            aria-hidden="true"
+            onChange={handleUploadInputChange}
+          />
+
           <div className="sidebar-section">
             <div className="section-title">
               <Star size={14} />
@@ -703,6 +1057,18 @@ function App() {
             ))}
           </div>
         </aside>
+      )}
+
+      {fileContextMenu && (
+        <FileContextMenu
+          state={fileContextMenu}
+          onCreate={createWorkspaceFile}
+          onRename={renameWorkspaceFile}
+          onDelete={deleteWorkspaceFile}
+          onUpload={(parentPath) => openUploadPicker(parentPath)}
+          onClose={() => setFileContextMenu(null)}
+          t={t}
+        />
       )}
 
       <main className="content">
@@ -1160,6 +1526,369 @@ function App() {
             : t("app.noActiveSession")}
         </span>
       </footer>
+    </div>
+  );
+}
+
+function FileExplorer({
+  entries,
+  workspaceRoot,
+  selectedPath,
+  preview,
+  expandedDirPaths,
+  dropTargetPath,
+  isBusy,
+  onSelect,
+  onToggleDirectory,
+  onContextMenu,
+  onCreate,
+  onUpload,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  t,
+}: {
+  entries: WorkspaceFileEntry[];
+  workspaceRoot: string;
+  selectedPath: string | null;
+  preview: WorkspaceFilePreview | null;
+  expandedDirPaths: Record<string, boolean>;
+  dropTargetPath: string | null;
+  isBusy: boolean;
+  onSelect: (entry: WorkspaceFileEntry) => void;
+  onToggleDirectory: (path: string) => void;
+  onContextMenu: (
+    event: MouseEvent,
+    entry: WorkspaceFileEntry | null,
+    parentPath: string | null,
+  ) => void;
+  onCreate: (
+    target: WorkspaceFileEntry | null,
+    kind: WorkspaceFileKind,
+  ) => Promise<void>;
+  onUpload: (parentPath: string | null) => void;
+  onDragOver: (event: DragEvent, parentPath: string | null) => void;
+  onDragLeave: () => void;
+  onDrop: (event: DragEvent, parentPath: string | null) => void;
+  t: (key: string, values?: Record<string, string | number>) => string;
+}) {
+  const selectedEntry = useMemo(
+    () => flattenFileEntries(entries).find((entry) => entry.path === selectedPath) ?? null,
+    [entries, selectedPath],
+  );
+  const selectedChildCount = selectedEntry?.children?.length ?? 0;
+
+  return (
+    <section
+      className="sidebar-section file-browser"
+      onContextMenu={(event) => onContextMenu(event, null, workspaceRoot || null)}
+      onDragOver={(event) => onDragOver(event, workspaceRoot || null)}
+      onDragLeave={onDragLeave}
+      onDrop={(event) => onDrop(event, workspaceRoot || null)}
+    >
+      <div className="file-browser-head">
+        <div className="section-title">
+          <FolderTree size={14} />
+          {t("files.title")}
+        </div>
+        <div className="file-actions">
+          <button
+            className="icon-button compact"
+            title={t("files.newFile")}
+            onClick={(event) => {
+              event.stopPropagation();
+              void onCreate(null, "file");
+            }}
+            disabled={isBusy}
+          >
+            <FilePlus2 size={13} />
+          </button>
+          <button
+            className="icon-button compact"
+            title={t("files.newFolder")}
+            onClick={(event) => {
+              event.stopPropagation();
+              void onCreate(null, "directory");
+            }}
+            disabled={isBusy}
+          >
+            <FolderPlus size={13} />
+          </button>
+          <button
+            className="icon-button compact"
+            title={t("files.upload")}
+            onClick={(event) => {
+              event.stopPropagation();
+              onUpload(workspaceRoot || null);
+            }}
+            disabled={isBusy}
+          >
+            <UploadCloud size={13} />
+          </button>
+        </div>
+      </div>
+
+      <div
+        className={
+          dropTargetPath === workspaceRoot ? "file-tree root is-drop-target" : "file-tree root"
+        }
+      >
+        <div className="file-root-label" title={workspaceRoot}>
+          {workspaceRoot || t("files.workspaceRoot")}
+        </div>
+        {entries.length === 0 ? (
+          <p className="muted tight file-empty">{t("files.empty")}</p>
+        ) : (
+          entries.map((entry) => (
+            <FileTreeNode
+              key={entry.path}
+              entry={entry}
+              level={0}
+              selectedPath={selectedPath}
+              expandedDirPaths={expandedDirPaths}
+              dropTargetPath={dropTargetPath}
+              onSelect={onSelect}
+              onToggleDirectory={onToggleDirectory}
+              onContextMenu={onContextMenu}
+              onDragOver={onDragOver}
+              onDragLeave={onDragLeave}
+              onDrop={onDrop}
+            />
+          ))
+        )}
+      </div>
+
+      <div className="file-preview">
+        <div className="panel-title">
+          <FileText size={15} />
+          {t("files.preview")}
+        </div>
+        {!preview ? (
+          <p className="muted tight">{t("files.previewEmpty")}</p>
+        ) : (
+          <div className="file-preview-body">
+            <div className="file-preview-meta">
+              <strong>{preview.name}</strong>
+              <span>
+                {preview.kind === "directory"
+                  ? t("files.folderMeta", { count: selectedChildCount })
+                  : formatFileSize(preview.size)}
+              </span>
+              {formatFileDate(preview.modifiedAt) && (
+                <span>{formatFileDate(preview.modifiedAt)}</span>
+              )}
+            </div>
+            {preview.kind === "directory" ? (
+              <p className="muted tight">
+                {t("files.folderPreview", { count: selectedChildCount })}
+              </p>
+            ) : preview.content ? (
+              <pre>{preview.content}</pre>
+            ) : (
+              <p className="muted tight">{t("files.binaryPreview")}</p>
+            )}
+            {preview.truncated && (
+              <p className="muted tight">{t("files.previewTruncated")}</p>
+            )}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function FileTreeNode({
+  entry,
+  level,
+  selectedPath,
+  expandedDirPaths,
+  dropTargetPath,
+  onSelect,
+  onToggleDirectory,
+  onContextMenu,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+}: {
+  entry: WorkspaceFileEntry;
+  level: number;
+  selectedPath: string | null;
+  expandedDirPaths: Record<string, boolean>;
+  dropTargetPath: string | null;
+  onSelect: (entry: WorkspaceFileEntry) => void;
+  onToggleDirectory: (path: string) => void;
+  onContextMenu: (
+    event: MouseEvent,
+    entry: WorkspaceFileEntry | null,
+    parentPath: string | null,
+  ) => void;
+  onDragOver: (event: DragEvent, parentPath: string | null) => void;
+  onDragLeave: () => void;
+  onDrop: (event: DragEvent, parentPath: string | null) => void;
+}) {
+  const isDirectory = entry.kind === "directory";
+  const isExpanded = Boolean(expandedDirPaths[entry.path]);
+  const childEntries = entry.children ?? [];
+  const targetDropPath = isDirectory ? entry.path : entry.parentPath ?? null;
+  const isDropTarget = Boolean(targetDropPath && dropTargetPath === targetDropPath);
+
+  return (
+    <div className="file-node-wrap">
+      <button
+        className={[
+          "file-node",
+          selectedPath === entry.path ? "selected" : "",
+          isDropTarget ? "is-drop-target" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        style={{ paddingLeft: 8 + level * 14 }}
+        onClick={(event) => {
+          event.stopPropagation();
+          onSelect(entry);
+        }}
+        onContextMenu={(event) => onContextMenu(event, entry, entry.parentPath ?? null)}
+        onDragOver={(event) => {
+          onDragOver(event, targetDropPath);
+        }}
+        onDragLeave={onDragLeave}
+        onDrop={(event) => {
+          onDrop(event, targetDropPath);
+        }}
+      >
+        <span
+          className="file-disclosure"
+          onClick={(event) => {
+            if (!isDirectory) {
+              return;
+            }
+            event.stopPropagation();
+            onToggleDirectory(entry.path);
+          }}
+        >
+          {isDirectory ? <ChevronDown size={12} /> : null}
+        </span>
+        {isDirectory ? (
+          isExpanded ? (
+            <FolderOpen size={14} />
+          ) : (
+            <Folder size={14} />
+          )
+        ) : (
+          <FileText size={14} />
+        )}
+        <span>{entry.name}</span>
+      </button>
+      {isDirectory && isExpanded && childEntries.length > 0 && (
+        <div className="file-children">
+          {childEntries.map((child) => (
+            <FileTreeNode
+              key={child.path}
+              entry={child}
+              level={level + 1}
+              selectedPath={selectedPath}
+              expandedDirPaths={expandedDirPaths}
+              dropTargetPath={dropTargetPath}
+              onSelect={onSelect}
+              onToggleDirectory={onToggleDirectory}
+              onContextMenu={onContextMenu}
+              onDragOver={onDragOver}
+              onDragLeave={onDragLeave}
+              onDrop={onDrop}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FileContextMenu({
+  state,
+  onCreate,
+  onRename,
+  onDelete,
+  onUpload,
+  onClose,
+  t,
+}: {
+  state: NonNullable<FileContextMenuState>;
+  onCreate: (
+    target: WorkspaceFileEntry | null,
+    kind: WorkspaceFileKind,
+  ) => Promise<void>;
+  onRename: (entry: WorkspaceFileEntry) => Promise<void>;
+  onDelete: (entry: WorkspaceFileEntry) => Promise<void>;
+  onUpload: (parentPath: string | null) => void;
+  onClose: () => void;
+  t: (key: string, values?: Record<string, string | number>) => string;
+}) {
+  const uploadParent = parentForFileAction(state.entry, state.parentPath);
+  const entry = state.entry;
+
+  return (
+    <div
+      className="context-menu file-context-menu"
+      style={{ left: state.x, top: state.y }}
+      onClick={(event) => event.stopPropagation()}
+      role="menu"
+    >
+      <button
+        role="menuitem"
+        onClick={() => {
+          onClose();
+          void onCreate(state.entry, "file");
+        }}
+      >
+        <FilePlus2 size={14} />
+        {t("files.newFile")}
+      </button>
+      <button
+        role="menuitem"
+        onClick={() => {
+          onClose();
+          void onCreate(state.entry, "directory");
+        }}
+      >
+        <FolderPlus size={14} />
+        {t("files.newFolder")}
+      </button>
+      <button
+        role="menuitem"
+        onClick={() => {
+          onClose();
+          onUpload(uploadParent);
+        }}
+      >
+        <UploadCloud size={14} />
+        {t("files.upload")}
+      </button>
+      {entry && (
+        <>
+          <div className="context-menu-divider" />
+          <button
+            role="menuitem"
+            onClick={() => {
+              onClose();
+              void onRename(entry);
+            }}
+          >
+            <Pencil size={14} />
+            {t("files.rename")}
+          </button>
+          <button
+            className="danger"
+            role="menuitem"
+            onClick={() => {
+              onClose();
+              void onDelete(entry);
+            }}
+          >
+            <Trash2 size={14} />
+            {t("files.delete")}
+          </button>
+        </>
+      )}
     </div>
   );
 }

@@ -9,6 +9,9 @@ import type {
   ConnectionProfileInput,
   RedactionPreview,
   TerminalSession,
+  WorkspaceFileEntry,
+  WorkspaceFilePreview,
+  WorkspaceFileTree,
 } from "./types";
 
 const defaultAiConfig: AiProviderConfig = {
@@ -121,6 +124,157 @@ function saveMockProfiles(profiles: ConnectionProfile[]) {
   localStorage.setItem("shellpro.preview.profiles", JSON.stringify(profiles));
 }
 
+const mockFileStorageKey = "shellpro.preview.files";
+
+function defaultMockFiles(): WorkspaceFileEntry[] {
+  return [
+    {
+      name: "README.md",
+      path: "/preview/README.md",
+      relativePath: "README.md",
+      parentPath: "/preview",
+      kind: "file",
+      size: 1409,
+      modifiedAt: now(),
+    },
+    {
+      name: "src",
+      path: "/preview/src",
+      relativePath: "src",
+      parentPath: "/preview",
+      kind: "directory",
+      modifiedAt: now(),
+      children: [
+        {
+          name: "App.tsx",
+          path: "/preview/src/App.tsx",
+          relativePath: "src/App.tsx",
+          parentPath: "/preview/src",
+          kind: "file",
+          size: 38442,
+          modifiedAt: now(),
+        },
+        {
+          name: "api.ts",
+          path: "/preview/src/api.ts",
+          relativePath: "src/api.ts",
+          parentPath: "/preview/src",
+          kind: "file",
+          size: 8120,
+          modifiedAt: now(),
+        },
+      ],
+    },
+    {
+      name: "docs",
+      path: "/preview/docs",
+      relativePath: "docs",
+      parentPath: "/preview",
+      kind: "directory",
+      modifiedAt: now(),
+      children: [
+        {
+          name: "shellpro-preview.png",
+          path: "/preview/docs/shellpro-preview.png",
+          relativePath: "docs/shellpro-preview.png",
+          parentPath: "/preview/docs",
+          kind: "file",
+          size: 182420,
+          modifiedAt: now(),
+        },
+      ],
+    },
+  ];
+}
+
+function mockFiles(): WorkspaceFileEntry[] {
+  try {
+    const saved = localStorage.getItem(mockFileStorageKey);
+    if (saved) {
+      return JSON.parse(saved) as WorkspaceFileEntry[];
+    }
+  } catch {
+    // Ignore invalid preview state and recreate it below.
+  }
+  const files = defaultMockFiles();
+  saveMockFiles(files);
+  return files;
+}
+
+function saveMockFiles(files: WorkspaceFileEntry[]) {
+  localStorage.setItem(mockFileStorageKey, JSON.stringify(files));
+}
+
+function dirname(path: string) {
+  if (path === "/preview") {
+    return null;
+  }
+  const index = path.lastIndexOf("/");
+  return index <= 0 ? "/preview" : path.slice(0, index);
+}
+
+function basename(path: string) {
+  return path.split("/").filter(Boolean).pop() ?? path;
+}
+
+function relativePath(path: string) {
+  return path.replace(/^\/preview\/?/, "");
+}
+
+function normalizeMockParent(path?: string | null) {
+  if (!path || path === "/preview") {
+    return "/preview";
+  }
+  return path;
+}
+
+function walkMockFiles(
+  entries: WorkspaceFileEntry[],
+  callback: (entry: WorkspaceFileEntry, siblings: WorkspaceFileEntry[]) => boolean | void,
+): WorkspaceFileEntry | null {
+  for (const entry of entries) {
+    if (callback(entry, entries)) {
+      return entry;
+    }
+    if (entry.children) {
+      const found = walkMockFiles(entry.children, callback);
+      if (found) {
+        return found;
+      }
+    }
+  }
+  return null;
+}
+
+function findMockFile(path: string) {
+  if (path === "/preview") {
+    return null;
+  }
+  return walkMockFiles(mockFiles(), (entry) => entry.path === path) ?? null;
+}
+
+function findMockDirectoryEntries(files: WorkspaceFileEntry[], parentPath: string) {
+  if (parentPath === "/preview") {
+    return files;
+  }
+  const directory = walkMockFiles(files, (entry) => entry.path === parentPath);
+  if (!directory || directory.kind !== "directory") {
+    throw new Error("Folder not found.");
+  }
+  directory.children ??= [];
+  return directory.children;
+}
+
+function rewriteMockDescendants(entry: WorkspaceFileEntry) {
+  entry.name = basename(entry.path);
+  entry.relativePath = relativePath(entry.path);
+  entry.parentPath = dirname(entry.path);
+  entry.children?.forEach((child) => {
+    child.path = `${entry.path}/${child.name}`;
+    rewriteMockDescendants(child);
+  });
+}
+
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (isTauriRuntime()) {
     return invoke<T>(command, args);
@@ -140,6 +294,7 @@ async function mockInvoke<T>(
         shell: "browser-preview",
         cwd: "/preview",
         os: navigator.platform,
+        workspaceRoot: "/preview",
       } as T;
     case "list_profiles":
       return mockProfiles() as T;
@@ -180,6 +335,136 @@ async function mockInvoke<T>(
         redactedChars: content.length,
         content,
       } as T;
+    }
+    case "list_workspace_files":
+      return {
+        root: "/preview",
+        entries: mockFiles(),
+      } as T;
+    case "preview_workspace_file": {
+      const path = String(args.path ?? "");
+      const entry = findMockFile(path);
+      if (!entry) {
+        throw new Error("File not found.");
+      }
+      return {
+        name: entry.name,
+        path: entry.path,
+        relativePath: entry.relativePath,
+        kind: entry.kind,
+        size: entry.size ?? null,
+        modifiedAt: entry.modifiedAt ?? null,
+        content:
+          entry.kind === "directory"
+            ? null
+            : `Preview content for ${entry.relativePath}\n\nThis browser preview mirrors desktop file actions.`,
+        truncated: false,
+      } as T;
+    }
+    case "create_workspace_file": {
+      const files = mockFiles();
+      const parentPath = normalizeMockParent(args.parentPath as string | undefined);
+      const siblings = findMockDirectoryEntries(files, parentPath);
+      const name = String(args.name ?? "").trim();
+      const kind = args.kind as WorkspaceFileEntry["kind"];
+      if (!name) {
+        throw new Error("Name is required.");
+      }
+      const path = `${parentPath}/${name}`;
+      if (siblings.some((entry) => entry.path === path)) {
+        throw new Error("A file or folder with that name already exists.");
+      }
+      siblings.push({
+        name,
+        path,
+        relativePath: relativePath(path),
+        parentPath,
+        kind,
+        size: kind === "file" ? 0 : null,
+        modifiedAt: now(),
+        children: kind === "directory" ? [] : undefined,
+      });
+      saveMockFiles(files);
+      return undefined as T;
+    }
+    case "delete_workspace_file": {
+      const files = mockFiles();
+      const path = String(args.path ?? "");
+      walkMockFiles(files, (entry, siblings) => {
+        if (entry.path === path) {
+          siblings.splice(siblings.indexOf(entry), 1);
+          return true;
+        }
+        return false;
+      });
+      saveMockFiles(files);
+      return undefined as T;
+    }
+    case "rename_workspace_file": {
+      const files = mockFiles();
+      const path = String(args.path ?? "");
+      const newName = String(args.newName ?? "").trim();
+      const entry = walkMockFiles(files, (item) => item.path === path);
+      if (!entry || !newName) {
+        throw new Error("File not found.");
+      }
+      const parentPath = dirname(path) ?? "/preview";
+      entry.name = newName;
+      entry.path = `${parentPath}/${newName}`;
+      rewriteMockDescendants(entry);
+      saveMockFiles(files);
+      return entry as T;
+    }
+    case "upload_workspace_files": {
+      const files = mockFiles();
+      const parentPath = normalizeMockParent(args.parentPath as string | undefined);
+      const siblings = findMockDirectoryEntries(files, parentPath);
+      const paths = (args.paths as string[] | undefined) ?? [];
+      paths.forEach((sourcePath) => {
+        const name = basename(sourcePath);
+        const path = `${parentPath}/${name}`;
+        siblings.push({
+          name,
+          path,
+          relativePath: relativePath(path),
+          parentPath,
+          kind: "file",
+          size: 0,
+          modifiedAt: now(),
+        });
+      });
+      saveMockFiles(files);
+      return undefined as T;
+    }
+    case "write_workspace_file": {
+      const files = mockFiles();
+      const parentPath = normalizeMockParent(args.parentPath as string | undefined);
+      const siblings = findMockDirectoryEntries(files, parentPath);
+      const name = String(args.name ?? "").trim();
+      if (!name) {
+        throw new Error("File name is required.");
+      }
+      const path = `${parentPath}/${name}`;
+      const bytes = (args.bytes as number[] | undefined) ?? [];
+      const existing = siblings.find((entry) => entry.path === path);
+      if (existing) {
+        existing.kind = "file";
+        existing.size = bytes.length;
+        existing.modifiedAt = now();
+        existing.children = undefined;
+      } else {
+        siblings.push({
+          name,
+          path,
+          relativePath: relativePath(path),
+          parentPath,
+          kind: "file",
+          size: bytes.length,
+          modifiedAt: now(),
+        });
+      }
+      saveMockFiles(files);
+      return undefined as T;
     }
     case "ask_ai_for_commands":
       return [
@@ -240,6 +525,34 @@ export const shellProApi = {
   bootstrap: () => call<AppBootstrap>("app_bootstrap"),
 
   listProfiles: () => call<ConnectionProfile[]>("list_profiles"),
+
+  listWorkspaceFiles: () => call<WorkspaceFileTree>("list_workspace_files"),
+
+  previewWorkspaceFile: (path: string) =>
+    call<WorkspaceFilePreview>("preview_workspace_file", { path }),
+
+  createWorkspaceFile: (
+    parentPath: string | null,
+    name: string,
+    kind: WorkspaceFileEntry["kind"],
+  ) =>
+    call<void>("create_workspace_file", {
+      parentPath,
+      name,
+      kind,
+    }),
+
+  deleteWorkspaceFile: (path: string) =>
+    call<void>("delete_workspace_file", { path }),
+
+  renameWorkspaceFile: (path: string, newName: string) =>
+    call<WorkspaceFileEntry>("rename_workspace_file", { path, newName }),
+
+  uploadWorkspaceFiles: (parentPath: string | null, paths: string[]) =>
+    call<void>("upload_workspace_files", { parentPath, paths }),
+
+  writeWorkspaceFile: (parentPath: string | null, name: string, bytes: number[]) =>
+    call<void>("write_workspace_file", { parentPath, name, bytes }),
 
   saveProfile: (input: ConnectionProfileInput) =>
     call<ConnectionProfile>("save_profile", { input }),

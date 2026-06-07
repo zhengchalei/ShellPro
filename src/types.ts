@@ -3,6 +3,7 @@ export type SessionKind = "local" | "ssh";
 export type SessionStatus = "connecting" | "connected" | "disconnected" | "error";
 export type RiskLevel = "low" | "medium" | "high";
 export type ContextMode = "selected" | "recentLines" | "fullBuffer";
+export type WorkspaceFileKind = "file" | "directory";
 
 export type ConnectionProfile = {
   id: string;
@@ -88,12 +89,40 @@ export type RedactionPreview = {
   content: string;
 };
 
+export type WorkspaceFileEntry = {
+  name: string;
+  path: string;
+  relativePath: string;
+  parentPath?: string | null;
+  kind: WorkspaceFileKind;
+  size?: number | null;
+  modifiedAt?: string | null;
+  children?: WorkspaceFileEntry[];
+};
+
+export type WorkspaceFilePreview = {
+  name: string;
+  path: string;
+  relativePath: string;
+  kind: WorkspaceFileKind;
+  size?: number | null;
+  modifiedAt?: string | null;
+  content?: string | null;
+  truncated: boolean;
+};
+
+export type WorkspaceFileTree = {
+  root: string;
+  entries: WorkspaceFileEntry[];
+};
+
 export type AppBootstrap = {
   profiles: ConnectionProfile[];
   aiConfig: AiProviderConfig;
   shell: string;
   cwd: string;
   os: string;
+  workspaceRoot: string;
 };
 
 export type TerminalEvent =
