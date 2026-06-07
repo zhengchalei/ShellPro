@@ -8,8 +8,9 @@ use serde_json::json;
 use std::{
     collections::HashMap,
     env,
+    fs,
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
     time::Duration,
@@ -20,6 +21,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 struct AppState {
     db_path: PathBuf,
+    workspace_root: PathBuf,
     terminals: Arc<Mutex<HashMap<String, TerminalProcess>>>,
 }
 
@@ -307,6 +309,46 @@ struct RedactionPreview {
     content: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceFileKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceFileEntry {
+    name: String,
+    path: String,
+    relative_path: String,
+    parent_path: Option<String>,
+    kind: WorkspaceFileKind,
+    size: Option<u64>,
+    modified_at: Option<String>,
+    children: Option<Vec<WorkspaceFileEntry>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceFileTree {
+    root: String,
+    entries: Vec<WorkspaceFileEntry>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceFilePreview {
+    name: String,
+    path: String,
+    relative_path: String,
+    kind: WorkspaceFileKind,
+    size: Option<u64>,
+    modified_at: Option<String>,
+    content: Option<String>,
+    truncated: bool,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppBootstrap {
@@ -315,6 +357,7 @@ struct AppBootstrap {
     shell: String,
     cwd: String,
     os: String,
+    workspace_root: String,
 }
 
 fn now() -> String {
@@ -374,6 +417,221 @@ fn open_db(path: &PathBuf) -> Result<Connection, String> {
     )
     .map_err(|error| format!("Could not initialize database: {error}"))?;
     Ok(conn)
+}
+
+fn workspace_root() -> Result<PathBuf, String> {
+    env::current_dir()
+        .map_err(|error| format!("Could not resolve workspace root: {error}"))
+        .and_then(|path| {
+            path.canonicalize()
+                .map_err(|error| format!("Could not canonicalize workspace root: {error}"))
+        })
+}
+
+fn is_ignored_workspace_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | "node_modules" | "target" | "dist" | "build" | ".vite"
+    )
+}
+
+fn modified_at(metadata: &fs::Metadata) -> Option<String> {
+    metadata
+        .modified()
+        .ok()
+        .map(chrono::DateTime::<Utc>::from)
+        .map(|time| time.to_rfc3339())
+}
+
+fn display_path(path: &Path) -> String {
+    path.display().to_string()
+}
+
+fn relative_display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .ok()
+        .map(|relative| relative.display().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| ".".to_string())
+}
+
+fn resolve_workspace_path(root: &Path, path: Option<String>) -> Result<PathBuf, String> {
+    let candidate = match path {
+        Some(value) if !value.trim().is_empty() => PathBuf::from(value),
+        _ => root.to_path_buf(),
+    };
+    let resolved = if candidate.is_absolute() {
+        candidate
+    } else {
+        root.join(candidate)
+    };
+    let canonical = resolved
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve path: {error}"))?;
+    if !canonical.starts_with(root) {
+        return Err("Path is outside the workspace.".to_string());
+    }
+    Ok(canonical)
+}
+
+fn resolve_new_workspace_path(
+    root: &Path,
+    parent_path: Option<String>,
+    name: &str,
+) -> Result<PathBuf, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Name is required.".to_string());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("Name cannot contain path separators.".to_string());
+    }
+    let parent = resolve_workspace_path(root, parent_path)?;
+    if !parent.is_dir() {
+        return Err("Target folder does not exist.".to_string());
+    }
+    let target = parent.join(name);
+    if !target.starts_with(root) {
+        return Err("Path is outside the workspace.".to_string());
+    }
+    Ok(target)
+}
+
+fn build_workspace_entry(
+    root: &Path,
+    path: &Path,
+    depth: usize,
+    remaining: &mut usize,
+) -> Result<Option<WorkspaceFileEntry>, String> {
+    if *remaining == 0 {
+        return Ok(None);
+    }
+    *remaining -= 1;
+
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Could not read metadata for {}: {error}", display_path(path)))?;
+    let name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| relative_display(root, path));
+    let is_directory = metadata.is_dir();
+    let parent_path = path
+        .parent()
+        .filter(|parent| parent.starts_with(root))
+        .map(display_path);
+
+    let children = if is_directory && depth > 0 {
+        let mut child_paths = fs::read_dir(path)
+            .map_err(|error| format!("Could not read directory {}: {error}", display_path(path)))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|child| {
+                child
+                    .file_name()
+                    .map(|name| !is_ignored_workspace_dir(&name.to_string_lossy()))
+                    .unwrap_or(true)
+            })
+            .collect::<Vec<_>>();
+        child_paths.sort_by(|left, right| {
+            let left_is_dir = left.is_dir();
+            let right_is_dir = right.is_dir();
+            right_is_dir
+                .cmp(&left_is_dir)
+                .then_with(|| left.file_name().cmp(&right.file_name()))
+        });
+
+        let mut child_entries = Vec::new();
+        for child in child_paths {
+            if let Some(entry) = build_workspace_entry(root, &child, depth - 1, remaining)? {
+                child_entries.push(entry);
+            }
+            if *remaining == 0 {
+                break;
+            }
+        }
+        Some(child_entries)
+    } else if is_directory {
+        Some(Vec::new())
+    } else {
+        None
+    };
+
+    Ok(Some(WorkspaceFileEntry {
+        name,
+        path: display_path(path),
+        relative_path: relative_display(root, path),
+        parent_path,
+        kind: if is_directory {
+            WorkspaceFileKind::Directory
+        } else {
+            WorkspaceFileKind::File
+        },
+        size: if metadata.is_file() {
+            Some(metadata.len())
+        } else {
+            None
+        },
+        modified_at: modified_at(&metadata),
+        children,
+    }))
+}
+
+fn list_workspace(root: &Path) -> Result<WorkspaceFileTree, String> {
+    let mut paths = fs::read_dir(root)
+        .map_err(|error| format!("Could not read workspace files: {error}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .map(|name| !is_ignored_workspace_dir(&name.to_string_lossy()))
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    paths.sort_by(|left, right| {
+        let left_is_dir = left.is_dir();
+        let right_is_dir = right.is_dir();
+        right_is_dir
+            .cmp(&left_is_dir)
+            .then_with(|| left.file_name().cmp(&right.file_name()))
+    });
+
+    let mut remaining = 500usize;
+    let mut entries = Vec::new();
+    for path in paths {
+        if let Some(entry) = build_workspace_entry(root, &path, 4, &mut remaining)? {
+            entries.push(entry);
+        }
+        if remaining == 0 {
+            break;
+        }
+    }
+
+    Ok(WorkspaceFileTree {
+        root: display_path(root),
+        entries,
+    })
+}
+
+fn read_text_preview(path: &Path) -> Result<(Option<String>, bool), String> {
+    const PREVIEW_LIMIT: usize = 64 * 1024;
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("Could not open file {}: {error}", display_path(path)))?;
+    let mut buffer = Vec::new();
+    let mut handle = std::io::Read::by_ref(&mut file).take((PREVIEW_LIMIT + 1) as u64);
+    handle
+        .read_to_end(&mut buffer)
+        .map_err(|error| format!("Could not read file preview: {error}"))?;
+    let truncated = buffer.len() > PREVIEW_LIMIT;
+    if truncated {
+        buffer.truncate(PREVIEW_LIMIT);
+    }
+    if buffer.contains(&0) {
+        return Ok((None, truncated));
+    }
+    match String::from_utf8(buffer) {
+        Ok(content) => Ok((Some(content), truncated)),
+        Err(_) => Ok((None, truncated)),
+    }
 }
 
 fn default_ai_config() -> AiProviderConfig {
@@ -1456,7 +1714,161 @@ fn app_bootstrap(state: State<AppState>) -> Result<AppBootstrap, String> {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| String::new()),
         os: env::consts::OS.to_string(),
+        workspace_root: display_path(&state.workspace_root),
     })
+}
+
+#[tauri::command]
+fn list_workspace_files(state: State<AppState>) -> Result<WorkspaceFileTree, String> {
+    list_workspace(&state.workspace_root)
+}
+
+#[tauri::command]
+fn preview_workspace_file(
+    state: State<AppState>,
+    path: String,
+) -> Result<WorkspaceFilePreview, String> {
+    let path = resolve_workspace_path(&state.workspace_root, Some(path))?;
+    let metadata = fs::metadata(&path)
+        .map_err(|error| format!("Could not read file metadata: {error}"))?;
+    let is_directory = metadata.is_dir();
+    let (content, truncated) = if metadata.is_file() {
+        read_text_preview(&path)?
+    } else {
+        (None, false)
+    };
+
+    Ok(WorkspaceFilePreview {
+        name: path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_else(|| relative_display(&state.workspace_root, &path)),
+        path: display_path(&path),
+        relative_path: relative_display(&state.workspace_root, &path),
+        kind: if is_directory {
+            WorkspaceFileKind::Directory
+        } else {
+            WorkspaceFileKind::File
+        },
+        size: if metadata.is_file() {
+            Some(metadata.len())
+        } else {
+            None
+        },
+        modified_at: modified_at(&metadata),
+        content,
+        truncated,
+    })
+}
+
+#[tauri::command]
+fn create_workspace_file(
+    state: State<AppState>,
+    parent_path: Option<String>,
+    name: String,
+    kind: WorkspaceFileKind,
+) -> Result<(), String> {
+    let target = resolve_new_workspace_path(&state.workspace_root, parent_path, &name)?;
+    if target.exists() {
+        return Err("A file or folder with that name already exists.".to_string());
+    }
+
+    match kind {
+        WorkspaceFileKind::Directory => {
+            fs::create_dir(&target)
+                .map_err(|error| format!("Could not create folder: {error}"))?;
+        }
+        WorkspaceFileKind::File => {
+            fs::File::create(&target)
+                .map_err(|error| format!("Could not create file: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_workspace_file(state: State<AppState>, path: String) -> Result<(), String> {
+    let target = resolve_workspace_path(&state.workspace_root, Some(path))?;
+    if target == state.workspace_root {
+        return Err("Cannot delete the workspace root.".to_string());
+    }
+    let metadata = fs::metadata(&target)
+        .map_err(|error| format!("Could not read file metadata: {error}"))?;
+    if metadata.is_dir() {
+        fs::remove_dir_all(&target)
+            .map_err(|error| format!("Could not delete folder: {error}"))?;
+    } else {
+        fs::remove_file(&target).map_err(|error| format!("Could not delete file: {error}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn rename_workspace_file(
+    state: State<AppState>,
+    path: String,
+    new_name: String,
+) -> Result<WorkspaceFileEntry, String> {
+    let target = resolve_workspace_path(&state.workspace_root, Some(path))?;
+    if target == state.workspace_root {
+        return Err("Cannot rename the workspace root.".to_string());
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| "Could not resolve parent folder.".to_string())?
+        .to_path_buf();
+    let next = resolve_new_workspace_path(
+        &state.workspace_root,
+        Some(display_path(&parent)),
+        new_name.trim(),
+    )?;
+    if next.exists() {
+        return Err("A file or folder with that name already exists.".to_string());
+    }
+    fs::rename(&target, &next).map_err(|error| format!("Could not rename file: {error}"))?;
+
+    let mut remaining = 1usize;
+    build_workspace_entry(&state.workspace_root, &next, 0, &mut remaining)?
+        .ok_or_else(|| "Could not read renamed file.".to_string())
+}
+
+#[tauri::command]
+fn upload_workspace_files(
+    state: State<AppState>,
+    parent_path: Option<String>,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    let parent = resolve_workspace_path(&state.workspace_root, parent_path)?;
+    if !parent.is_dir() {
+        return Err("Upload target must be a folder.".to_string());
+    }
+
+    for source in paths {
+        let source_path = PathBuf::from(&source)
+            .canonicalize()
+            .map_err(|error| format!("Could not resolve upload source {source}: {error}"))?;
+        if source_path.is_dir() {
+            return Err("Folder upload is not supported yet.".to_string());
+        }
+        let name = source_path
+            .file_name()
+            .ok_or_else(|| "Could not resolve upload file name.".to_string())?;
+        let target = parent.join(name);
+        fs::copy(&source_path, &target)
+            .map_err(|error| format!("Could not upload {}: {error}", display_path(&source_path)))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn write_workspace_file(
+    state: State<AppState>,
+    parent_path: Option<String>,
+    name: String,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    let target = resolve_new_workspace_path(&state.workspace_root, parent_path, &name)?;
+    fs::write(&target, bytes).map_err(|error| format!("Could not write file: {error}"))
 }
 
 #[tauri::command]
@@ -1939,14 +2351,23 @@ pub fn run() {
             let db_path = app_data_dir(&app.handle())?.join("shellpro.sqlite3");
             let conn = open_db(&db_path)?;
             let _ = load_ai_config(&conn)?;
+            let workspace_root = workspace_root()?;
             app.manage(AppState {
                 db_path,
+                workspace_root,
                 terminals: Arc::new(Mutex::new(HashMap::new())),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             app_bootstrap,
+            list_workspace_files,
+            preview_workspace_file,
+            create_workspace_file,
+            delete_workspace_file,
+            rename_workspace_file,
+            upload_workspace_files,
+            write_workspace_file,
             list_profiles,
             save_profile,
             delete_profile,
