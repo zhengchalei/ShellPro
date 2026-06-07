@@ -630,12 +630,24 @@ fn set_secret(secret_ref: &str, secret: &str) -> Result<(), String> {
         .map_err(|error| format!("Could not store secret: {error}"))
 }
 
-#[allow(dead_code)]
 fn get_secret(secret_ref: &str) -> Result<Option<String>, String> {
     match keyring_entry(secret_ref)?.get_password() {
         Ok(secret) => Ok(Some(secret)),
         Err(KeyringError::NoEntry) => Ok(None),
         Err(error) => Err(format!("Could not read secret: {error}")),
+    }
+}
+
+fn profile_secret_ref(profile_id: &str, auth_type: &AuthType) -> String {
+    format!("profile-{profile_id}-{}", auth_type.as_str())
+}
+
+fn load_profile_secret(profile: &ConnectionProfile) -> Result<Option<String>, String> {
+    match &profile.auth_type {
+        AuthType::Password | AuthType::PrivateKey => {
+            get_secret(&profile_secret_ref(&profile.id, &profile.auth_type))
+        }
+        AuthType::Agent => Ok(None),
     }
 }
 
@@ -713,9 +725,12 @@ fn spawn_reader(
     session_id: String,
     mut reader: Box<dyn Read + Send>,
     writer: TerminalWriter,
+    auto_secret: Option<String>,
 ) {
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
+        let mut prompt_buffer = String::new();
+        let mut sent_auto_secret = false;
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => {
@@ -727,7 +742,33 @@ fn spawn_reader(
                     let (output, query_count) = filter_device_status_reports(&output);
                     answer_device_status_reports(&app, &session_id, &writer, query_count);
                     if !output.is_empty() {
+                        prompt_buffer.push_str(&output);
+                        if prompt_buffer.chars().count() > 600 {
+                            prompt_buffer = prompt_buffer
+                                .chars()
+                                .rev()
+                                .take(600)
+                                .collect::<String>()
+                                .chars()
+                                .rev()
+                                .collect();
+                        }
                         emit_terminal_event(&app, &session_id, "data", json!({ "data": output }));
+                        if !sent_auto_secret && looks_like_credential_prompt(&prompt_buffer) {
+                            if let Some(secret) =
+                                auto_secret.as_ref().filter(|value| !value.is_empty())
+                            {
+                                sent_auto_secret = true;
+                                if let Err(error) = write_secret_to_terminal(&writer, secret) {
+                                    emit_terminal_event(
+                                        &app,
+                                        &session_id,
+                                        "error",
+                                        json!({ "message": error }),
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
                 Err(error) => {
@@ -744,6 +785,35 @@ fn spawn_reader(
     });
 }
 
+fn looks_like_credential_prompt(output: &str) -> bool {
+    let normalized = output.to_lowercase();
+    let trimmed = normalized.trim_end();
+    let has_prompt_suffix = trimmed.ends_with(':') || trimmed.ends_with(": ");
+    if !has_prompt_suffix {
+        return false;
+    }
+
+    trimmed.contains("password")
+        || trimmed.contains("passphrase")
+        || trimmed.contains("密码")
+        || trimmed.contains("口令")
+}
+
+fn write_secret_to_terminal(writer: &TerminalWriter, secret: &str) -> Result<(), String> {
+    let mut writer = writer
+        .lock()
+        .map_err(|_| "Could not lock terminal writer for saved SSH secret.".to_string())?;
+    writer
+        .write_all(secret.as_bytes())
+        .map_err(|error| format!("Could not write saved SSH secret: {error}"))?;
+    writer
+        .write_all(command_line_ending().as_bytes())
+        .map_err(|error| format!("Could not submit saved SSH secret: {error}"))?;
+    writer
+        .flush()
+        .map_err(|error| format!("Could not flush saved SSH secret: {error}"))
+}
+
 fn spawn_terminal(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -754,6 +824,7 @@ fn spawn_terminal(
     cwd: Option<String>,
     shell: Option<String>,
     kind: SessionKind,
+    auto_secret: Option<String>,
 ) -> Result<TerminalSession, String> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -803,7 +874,7 @@ fn spawn_terminal(
                 master: pair.master,
             },
         );
-    spawn_reader(app, session_id, reader, writer);
+    spawn_reader(app, session_id, reader, writer, auto_secret);
     Ok(session)
 }
 
@@ -1417,7 +1488,7 @@ fn save_profile_secret(
     secret_kind: String,
     secret: String,
 ) -> Result<String, String> {
-    let secret_ref = format!("profile-{profile_id}-{secret_kind}");
+    let secret_ref = profile_secret_ref(&profile_id, &AuthType::from_str(&secret_kind));
     set_secret(&secret_ref, &secret)?;
     Ok(secret_ref)
 }
@@ -1541,6 +1612,7 @@ fn start_local_session(
         cwd,
         Some(shell),
         SessionKind::Local,
+        None,
     )?;
 
     let _ = (cols, rows);
@@ -1556,6 +1628,7 @@ fn start_ssh_session(
 ) -> Result<TerminalSession, String> {
     let conn = open_db(&state.db_path)?;
     let profile = find_profile(&conn, &profile_id)?;
+    let auto_secret = load_profile_secret(&profile)?;
     let session_id = Uuid::new_v4().to_string();
     let destination = format!("{}@{}", profile.username, profile.host);
     let mut command = CommandBuilder::new("ssh");
@@ -1565,12 +1638,25 @@ fn start_ssh_session(
     command.arg("ServerAliveInterval=30");
     command.arg("-o");
     command.arg("ServerAliveCountMax=3");
+    command.arg("-o");
+    command.arg("BatchMode=no");
 
-    if let Some(key_path) = &profile.private_key_path {
-        if matches!(profile.auth_type, AuthType::PrivateKey) {
-            command.arg("-i");
-            command.arg(key_path);
+    match &profile.auth_type {
+        AuthType::Password => {
+            command.arg("-o");
+            command.arg("PreferredAuthentications=password,keyboard-interactive");
+            command.arg("-o");
+            command.arg("PubkeyAuthentication=no");
         }
+        AuthType::PrivateKey => {
+            command.arg("-o");
+            command.arg("IdentitiesOnly=yes");
+            if let Some(key_path) = &profile.private_key_path {
+                command.arg("-i");
+                command.arg(key_path);
+            }
+        }
+        AuthType::Agent => {}
     }
 
     if let Some(jump_host_id) = &profile.jump_host_id {
@@ -1594,6 +1680,7 @@ fn start_ssh_session(
         None,
         Some("ssh".to_string()),
         SessionKind::Ssh,
+        auto_secret,
     )
 }
 
@@ -1796,6 +1883,31 @@ mod tests {
         } else {
             assert_eq!(command_line_ending(), "\n");
         }
+    }
+
+    #[test]
+    fn builds_profile_secret_refs_from_auth_type() {
+        assert_eq!(
+            profile_secret_ref("abc", &AuthType::Password),
+            "profile-abc-password"
+        );
+        assert_eq!(
+            profile_secret_ref("abc", &AuthType::PrivateKey),
+            "profile-abc-privateKey"
+        );
+    }
+
+    #[test]
+    fn detects_ssh_credential_prompts() {
+        assert!(looks_like_credential_prompt("root@example.com's password:"));
+        assert!(looks_like_credential_prompt(
+            "Enter passphrase for key '/Users/me/.ssh/id_ed25519':"
+        ));
+        assert!(looks_like_credential_prompt("请输入密码:"));
+        assert!(!looks_like_credential_prompt("password=[REDACTED]\n"));
+        assert!(!looks_like_credential_prompt(
+            "Permission denied, please try again."
+        ));
     }
 
     #[test]

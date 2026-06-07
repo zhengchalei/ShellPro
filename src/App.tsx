@@ -59,6 +59,13 @@ const emptyProfile: ConnectionProfileInput = {
   favorite: false,
 };
 
+function createEmptyProfile(): ConnectionProfileInput {
+  return {
+    ...emptyProfile,
+    tags: [],
+  };
+}
+
 function compactBuffer(buffer: string, limit = 24000) {
   if (buffer.length <= limit) {
     return buffer;
@@ -77,6 +84,18 @@ function textToTags(value: string) {
     .filter(Boolean);
 }
 
+function authTypeLabel(
+  authType: ConnectionProfile["authType"],
+  t: (key: string, values?: Record<string, string | number>) => string,
+) {
+  const labels: Record<ConnectionProfile["authType"], string> = {
+    agent: t("profile.authAgent"),
+    privateKey: t("profile.authPrivateKey"),
+    password: t("profile.authPassword"),
+  };
+  return labels[authType];
+}
+
 function App() {
   const { locale, setLocale, t } = useI18n();
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
@@ -88,7 +107,8 @@ function App() {
   const [aiConfig, setAiConfig] = useState<AiProviderConfig | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("workspace");
   const [profileDraft, setProfileDraft] =
-    useState<ConnectionProfileInput>(emptyProfile);
+    useState<ConnectionProfileInput>(createEmptyProfile);
+  const [isProfileDialogOpen, setIsProfileDialogOpen] = useState(false);
   const [aiQuestion, setAiQuestion] = useState("");
   const [suggestions, setSuggestions] = useState<AiCommandSuggestion[]>([]);
   const [queue, setQueue] = useState<CommandQueueItem[]>([]);
@@ -206,6 +226,21 @@ function App() {
     preview.scrollTop = preview.scrollHeight;
   }, [contextPreview, isInspectorVisible]);
 
+  useEffect(() => {
+    if (!isProfileDialogOpen) {
+      return;
+    }
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeProfileDialog();
+      }
+    };
+
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [isProfileDialogOpen]);
+
   const updateSessionStatus = useCallback(
     (sessionId: string, status: TerminalSession["status"]) => {
       setSessions((current) =>
@@ -279,11 +314,19 @@ function App() {
         setSecretDraft("");
       }
       await refreshBootstrap();
-      setProfileDraft(emptyProfile);
+      setProfileDraft(createEmptyProfile());
+      setIsProfileDialogOpen(false);
       setStatusMessage(t("app.connectionSaved", { name: saved.name }));
     } catch (error) {
       setStatusMessage(String(error));
     }
+  }
+
+  function openCreateProfile() {
+    setViewMode("connections");
+    setProfileDraft(createEmptyProfile());
+    setSecretDraft("");
+    setIsProfileDialogOpen(true);
   }
 
   function editProfile(profile: ConnectionProfile) {
@@ -301,6 +344,14 @@ function App() {
       jumpHostId: profile.jumpHostId ?? "",
       favorite: profile.favorite,
     });
+    setSecretDraft("");
+    setIsProfileDialogOpen(true);
+  }
+
+  function closeProfileDialog() {
+    setIsProfileDialogOpen(false);
+    setProfileDraft(createEmptyProfile());
+    setSecretDraft("");
   }
 
   async function deleteProfile(profileId: string) {
@@ -425,7 +476,7 @@ function App() {
             <PanelLeft size={17} />
           </button>
           <div className="window-title">
-            <TerminalSquare size={18} />
+            <ShellProLogo size="compact" />
             <span>ShellPro</span>
           </div>
         </div>
@@ -624,7 +675,7 @@ function App() {
               </div>
               <button
                 className="toolbar-button"
-                onClick={() => setProfileDraft(emptyProfile)}
+                onClick={openCreateProfile}
               >
                 <Plus size={16} />
                 {t("connections.new")}
@@ -636,8 +687,13 @@ function App() {
                   <div className="profile-row" key={profile.id}>
                     <div>
                       <strong>{profile.name}</strong>
-                      <span>
-                        {profile.username}@{profile.host}:{profile.port}
+                      <span className="profile-meta">
+                        <span>
+                          {profile.username}@{profile.host}:{profile.port}
+                        </span>
+                        <span className="auth-chip">
+                          {authTypeLabel(profile.authType, t)}
+                        </span>
                       </span>
                     </div>
                     <div className="row-actions">
@@ -669,14 +725,6 @@ function App() {
                   <div className="empty-table">{t("connections.noMatches")}</div>
                 )}
               </div>
-              <ProfileEditor
-                draft={profileDraft}
-                secretDraft={secretDraft}
-                setSecretDraft={setSecretDraft}
-                onChange={setProfileDraft}
-                onSubmit={saveProfile}
-                t={t}
-              />
             </div>
           </section>
         )}
@@ -852,6 +900,36 @@ function App() {
         )}
       </main>
 
+      {isProfileDialogOpen && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeProfileDialog();
+            }
+          }}
+        >
+          <div
+            className="modal-panel profile-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="profile-dialog-title"
+          >
+            <ProfileEditor
+              draft={profileDraft}
+              secretDraft={secretDraft}
+              setSecretDraft={setSecretDraft}
+              onChange={setProfileDraft}
+              onSubmit={saveProfile}
+              onCancel={closeProfileDialog}
+              isEditing={Boolean(profileDraft.id)}
+              t={t}
+            />
+          </div>
+        </div>
+      )}
+
       {isInspectorVisible && (
         <aside className="inspector">
           <div className="inspector-header">
@@ -1007,6 +1085,20 @@ function ConnectionRow({
   );
 }
 
+function ShellProLogo({ size = "normal" }: { size?: "compact" | "normal" | "large" }) {
+  return (
+    <span className={`logo-mark ${size}`} aria-hidden="true">
+      <svg viewBox="0 0 64 64" focusable="false">
+        <rect className="logo-shell" x="7" y="9" width="50" height="46" rx="10" />
+        <path className="logo-window" d="M14 20h36" />
+        <path className="logo-prompt" d="M18 33l7 6-7 6" />
+        <path className="logo-cursor" d="M31 45h12" />
+        <path className="logo-bolt" d="M39 16 30 34h10l-6 15 17-25H40l6-8Z" />
+      </svg>
+    </span>
+  );
+}
+
 function EmptyWorkspace({
   onLocal,
   onSsh,
@@ -1018,7 +1110,7 @@ function EmptyWorkspace({
 }) {
   return (
     <div className="empty-workspace">
-      <TerminalSquare size={42} />
+      <ShellProLogo size="large" />
       <h1>ShellPro</h1>
       <p>{t("workspace.startDescription")}</p>
       <div className="empty-actions">
@@ -1045,6 +1137,8 @@ function ProfileEditor({
   setSecretDraft,
   onChange,
   onSubmit,
+  onCancel,
+  isEditing,
   t,
 }: {
   draft: ConnectionProfileInput;
@@ -1052,139 +1146,201 @@ function ProfileEditor({
   setSecretDraft: (value: string) => void;
   onChange: (draft: ConnectionProfileInput) => void;
   onSubmit: (event: FormEvent) => void;
+  onCancel: () => void;
+  isEditing: boolean;
   t: (key: string, values?: Record<string, string | number>) => string;
 }) {
+  const showPrivateKey = draft.authType === "privateKey";
+  const showSecret = draft.authType !== "agent";
+  const secretLabel =
+    draft.authType === "password"
+      ? t("profile.password")
+      : t("profile.passphrase");
+
   return (
     <form className="profile-editor" onSubmit={onSubmit}>
-      <div className="panel-title">
-        <FileKey2 size={17} />
-        {t("profile.detail")}
+      <div className="profile-editor-head">
+        <div>
+          <p className="eyebrow">{t("profile.detail")}</p>
+          <h2 id="profile-dialog-title">
+            {isEditing ? t("profile.editTitle") : t("profile.createTitle")}
+          </h2>
+        </div>
+        <button
+          className="icon-button"
+          type="button"
+          title={t("profile.cancel")}
+          onClick={onCancel}
+        >
+          <X size={15} />
+        </button>
       </div>
-      <label>
-        {t("profile.name")}
-        <input
-          value={draft.name}
-          onChange={(event) =>
-            onChange({ ...draft, name: event.currentTarget.value })
-          }
-          placeholder={t("profile.namePlaceholder")}
-        />
-      </label>
-      <div className="split-fields">
+
+      <section className="form-section">
+        <div className="panel-title">
+          <Server size={17} />
+          {t("profile.basicSection")}
+        </div>
         <label>
-          {t("profile.host")}
+          {t("profile.name")}
           <input
-            value={draft.host}
+            value={draft.name}
             onChange={(event) =>
-              onChange({ ...draft, host: event.currentTarget.value })
+              onChange({ ...draft, name: event.currentTarget.value })
             }
-            placeholder={t("profile.hostPlaceholder")}
+            placeholder={t("profile.namePlaceholder")}
           />
         </label>
+        <div className="form-grid host-grid">
+          <label>
+            {t("profile.host")}
+            <input
+              value={draft.host}
+              onChange={(event) =>
+                onChange({ ...draft, host: event.currentTarget.value })
+              }
+              placeholder={t("profile.hostPlaceholder")}
+            />
+          </label>
+          <label>
+            {t("profile.port")}
+            <input
+              type="number"
+              min={1}
+              max={65535}
+              value={draft.port}
+              onChange={(event) =>
+                onChange({ ...draft, port: Number(event.currentTarget.value) })
+              }
+            />
+          </label>
+        </div>
         <label>
-          {t("profile.port")}
+          {t("profile.username")}
           <input
-            type="number"
-            min={1}
-            max={65535}
-            value={draft.port}
+            value={draft.username}
             onChange={(event) =>
-              onChange({ ...draft, port: Number(event.currentTarget.value) })
+              onChange({ ...draft, username: event.currentTarget.value })
             }
+            placeholder={t("profile.usernamePlaceholder")}
           />
         </label>
-      </div>
-      <label>
-        {t("profile.username")}
-        <input
-          value={draft.username}
-          onChange={(event) =>
-            onChange({ ...draft, username: event.currentTarget.value })
-          }
-          placeholder={t("profile.usernamePlaceholder")}
-        />
-      </label>
-      <div className="split-fields">
+      </section>
+
+      <section className="form-section">
+        <div className="panel-title">
+          <FileKey2 size={17} />
+          {t("profile.authSection")}
+        </div>
         <label>
           {t("profile.auth")}
           <select
             value={draft.authType}
-            onChange={(event) =>
+            onChange={(event) => {
+              const authType = event.currentTarget
+                .value as ConnectionProfile["authType"];
               onChange({
                 ...draft,
-                authType: event.currentTarget.value as ConnectionProfile["authType"],
-              })
-            }
+                authType,
+                privateKeyPath:
+                  authType === "privateKey" ? draft.privateKeyPath : "",
+              });
+              if (authType === "agent") {
+                setSecretDraft("");
+              }
+            }}
           >
             <option value="agent">{t("profile.authAgent")}</option>
             <option value="privateKey">{t("profile.authPrivateKey")}</option>
             <option value="password">{t("profile.authPassword")}</option>
           </select>
+          <small>{t("profile.authHelp")}</small>
         </label>
+        {showPrivateKey && (
+          <label>
+            {t("profile.privateKeyPath")}
+            <input
+              value={draft.privateKeyPath ?? ""}
+              onChange={(event) =>
+                onChange({ ...draft, privateKeyPath: event.currentTarget.value })
+              }
+              placeholder={t("profile.privateKeyPlaceholder")}
+            />
+          </label>
+        )}
+        {showSecret && (
+          <label>
+            {secretLabel}
+            <input
+              type="password"
+              value={secretDraft}
+              placeholder={t("profile.secretPlaceholder")}
+              onChange={(event) => setSecretDraft(event.currentTarget.value)}
+            />
+            <small>{t("profile.secretSavedHint")}</small>
+          </label>
+        )}
+      </section>
+
+      <section className="form-section">
+        <div className="panel-title">
+          <FolderTree size={17} />
+          {t("profile.organizeSection")}
+        </div>
+        <div className="form-grid">
+          <label>
+            {t("profile.group")}
+            <input
+              value={draft.groupId ?? ""}
+              onChange={(event) =>
+                onChange({ ...draft, groupId: event.currentTarget.value })
+              }
+              placeholder={t("profile.groupPlaceholder")}
+            />
+          </label>
+          <label>
+            {t("profile.tags")}
+            <input
+              value={tagsToText(draft.tags)}
+              onChange={(event) =>
+                onChange({ ...draft, tags: textToTags(event.currentTarget.value) })
+              }
+              placeholder={t("profile.tagsPlaceholder")}
+            />
+          </label>
+        </div>
         <label>
-          {t("profile.secret")}
+          {t("profile.jumpHost")}
           <input
-            type="password"
-            value={secretDraft}
-            placeholder={t("profile.secretPlaceholder")}
-            onChange={(event) => setSecretDraft(event.currentTarget.value)}
+            value={draft.jumpHostId ?? ""}
+            onChange={(event) =>
+              onChange({ ...draft, jumpHostId: event.currentTarget.value })
+            }
+            placeholder={t("profile.jumpHostPlaceholder")}
           />
         </label>
-      </div>
-      <label>
-        {t("profile.privateKeyPath")}
-        <input
-          value={draft.privateKeyPath ?? ""}
-          onChange={(event) =>
-            onChange({ ...draft, privateKeyPath: event.currentTarget.value })
-          }
-          placeholder="~/.ssh/id_ed25519"
-        />
-      </label>
-      <div className="split-fields">
-        <label>
-          {t("profile.group")}
+        <label className="check-row">
           <input
-            value={draft.groupId ?? ""}
+            type="checkbox"
+            checked={draft.favorite}
             onChange={(event) =>
-              onChange({ ...draft, groupId: event.currentTarget.value })
+              onChange({ ...draft, favorite: event.currentTarget.checked })
             }
           />
+          <span>{t("profile.favorite")}</span>
+          <small>{t("profile.favoriteHelp")}</small>
         </label>
-        <label>
-          {t("profile.tags")}
-          <input
-            value={tagsToText(draft.tags)}
-            onChange={(event) =>
-              onChange({ ...draft, tags: textToTags(event.currentTarget.value) })
-            }
-            placeholder={t("profile.tagsPlaceholder")}
-          />
-        </label>
+      </section>
+
+      <div className="form-actions">
+        <button className="secondary-button" type="button" onClick={onCancel}>
+          {t("profile.cancel")}
+        </button>
+        <button className="primary-button" type="submit">
+          <Save size={16} />
+          {t("profile.save")}
+        </button>
       </div>
-      <label>
-        {t("profile.jumpHost")}
-        <input
-          value={draft.jumpHostId ?? ""}
-          onChange={(event) =>
-            onChange({ ...draft, jumpHostId: event.currentTarget.value })
-          }
-        />
-      </label>
-      <label className="check-row">
-        <input
-          type="checkbox"
-          checked={draft.favorite}
-          onChange={(event) =>
-            onChange({ ...draft, favorite: event.currentTarget.checked })
-          }
-        />
-        {t("profile.favorite")}
-      </label>
-      <button className="primary-button" type="submit">
-        <Save size={16} />
-        {t("profile.save")}
-      </button>
     </form>
   );
 }
