@@ -544,6 +544,12 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.session-scope {
+  margin: 5px 0 0;
+  color: #6b7280;
+  font-size: 12px;
+}
+
 h1,
 h2 {
   margin: 0;
@@ -733,6 +739,11 @@ label small {
 .tight {
   margin: 0;
   color: #6b7280;
+}
+
+.suggestion-list > .muted,
+.queue-list > .muted {
+  padding: 4px 0;
 }
 
 .suggestion-card small {

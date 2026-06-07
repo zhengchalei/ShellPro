@@ -45,6 +45,7 @@ import type {
 } from "./types";
 
 type ViewMode = "workspace" | "connections" | "settings";
+type SuggestionState = "idle" | "loading" | "empty" | "ready";
 
 const emptyProfile: ConnectionProfileInput = {
   name: "",
@@ -110,7 +111,12 @@ function App() {
     useState<ConnectionProfileInput>(createEmptyProfile);
   const [isProfileDialogOpen, setIsProfileDialogOpen] = useState(false);
   const [aiQuestion, setAiQuestion] = useState("");
-  const [suggestions, setSuggestions] = useState<AiCommandSuggestion[]>([]);
+  const [suggestionsBySessionId, setSuggestionsBySessionId] = useState<
+    Record<string, AiCommandSuggestion[]>
+  >({});
+  const [suggestionStatesBySessionId, setSuggestionStatesBySessionId] = useState<
+    Record<string, SuggestionState>
+  >({});
   const [queue, setQueue] = useState<CommandQueueItem[]>([]);
   const [contextPreview, setContextPreview] = useState("");
   const [selectedContextMode, setSelectedContextMode] = useState<
@@ -118,13 +124,17 @@ function App() {
   >("recent");
   const [manualSelection, setManualSelection] = useState("");
   const [statusMessage, setStatusMessage] = useState(t("app.ready"));
-  const [isAiBusy, setIsAiBusy] = useState(false);
+  const [busySessionIds, setBusySessionIds] = useState<Record<string, boolean>>(
+    {},
+  );
   const [isSidebarVisible, setIsSidebarVisible] = useState(true);
   const [isInspectorVisible, setIsInspectorVisible] = useState(true);
   const [searchText, setSearchText] = useState("");
   const [secretDraft, setSecretDraft] = useState("");
   const [aiKeyDraft, setAiKeyDraft] = useState("");
   const contextPreviewRef = useRef<HTMLPreElement | null>(null);
+  const aiRequestTokensRef = useRef<Record<string, number>>({});
+  const activeSessionIdRef = useRef<string | null>(null);
   const [aiDraft, setAiDraft] = useState<{
     name: string;
     baseUrl: string;
@@ -143,6 +153,19 @@ function App() {
 
   const activeSession = sessions.find((session) => session.id === activeSessionId);
   const activeBuffer = activeSessionId ? terminalBuffers[activeSessionId] ?? "" : "";
+  const activeSuggestions = activeSessionId
+    ? suggestionsBySessionId[activeSessionId] ?? []
+    : [];
+  const activeSuggestionState = activeSessionId
+    ? suggestionStatesBySessionId[activeSessionId] ?? "idle"
+    : "idle";
+  const activeQueue = activeSessionId
+    ? queue.filter((item) => item.sessionId === activeSessionId)
+    : [];
+  const isAiBusy = activeSessionId ? busySessionIds[activeSessionId] ?? false : false;
+  const activeSessionLabel = activeSession
+    ? `${activeSession.title} · ${t(`session.${activeSession.status}`)}`
+    : t("app.noActiveSession");
   const filteredProfiles = profiles.filter((profile) => {
     const needle = searchText.trim().toLowerCase();
     if (!needle) {
@@ -200,6 +223,10 @@ function App() {
   useEffect(() => {
     void refreshBootstrap();
   }, [refreshBootstrap]);
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
 
   useEffect(() => {
     if (!activeBuffer) {
@@ -299,6 +326,23 @@ function App() {
       delete next[sessionId];
       return next;
     });
+    setSuggestionsBySessionId((current) => {
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    setSuggestionStatesBySessionId((current) => {
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    setQueue((current) => current.filter((item) => item.sessionId !== sessionId));
+    setBusySessionIds((current) => {
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    delete aiRequestTokensRef.current[sessionId];
     if (activeSessionId === sessionId) {
       const nextSession = sessions.find((session) => session.id !== sessionId);
       setActiveSessionId(nextSession?.id ?? null);
@@ -375,26 +419,75 @@ function App() {
     if (!aiQuestion.trim()) {
       return;
     }
-    setIsAiBusy(true);
+    if (!activeSessionId) {
+      setStatusMessage(t("app.openTerminalFirst"));
+      return;
+    }
+
+    const sessionId = activeSessionId;
+    const session = activeSession;
+    const buffer = activeBuffer;
+    const requestToken = (aiRequestTokensRef.current[sessionId] ?? 0) + 1;
+    aiRequestTokensRef.current[sessionId] = requestToken;
+    setSuggestionsBySessionId((current) => ({
+      ...current,
+      [sessionId]: [],
+    }));
+    setSuggestionStatesBySessionId((current) => ({
+      ...current,
+      [sessionId]: "loading",
+    }));
+    setBusySessionIds((current) => ({
+      ...current,
+      [sessionId]: true,
+    }));
     try {
       const context =
         selectedContextMode === "selected" && manualSelection.trim()
           ? manualSelection
-          : activeBuffer.split(/\r?\n/).slice(-200).join("\n");
+          : buffer.split(/\r?\n/).slice(-200).join("\n");
       const result = await shellProApi.askAiForCommands({
         question: aiQuestion,
         context,
         selectedText: manualSelection || undefined,
         os: navigator.platform,
-        shell: activeSession?.shell ?? undefined,
-        cwd: activeSession?.cwd ?? undefined,
+        shell: session?.shell ?? undefined,
+        cwd: session?.cwd ?? undefined,
       });
-      setSuggestions(result);
-      setStatusMessage(t("app.aiSuggested", { count: result.length }));
+      if (aiRequestTokensRef.current[sessionId] !== requestToken) {
+        return;
+      }
+      setSuggestionsBySessionId((current) => ({
+        ...current,
+        [sessionId]: result,
+      }));
+      setSuggestionStatesBySessionId((current) => ({
+        ...current,
+        [sessionId]: result.length > 0 ? "ready" : "empty",
+      }));
+      if (activeSessionIdRef.current === sessionId) {
+        setStatusMessage(t("app.aiSuggested", { count: result.length }));
+      }
     } catch (error) {
-      setStatusMessage(String(error));
+      if (
+        aiRequestTokensRef.current[sessionId] === requestToken &&
+        activeSessionIdRef.current === sessionId
+      ) {
+        setStatusMessage(String(error));
+      }
+      if (aiRequestTokensRef.current[sessionId] === requestToken) {
+        setSuggestionStatesBySessionId((current) => ({
+          ...current,
+          [sessionId]: "idle",
+        }));
+      }
     } finally {
-      setIsAiBusy(false);
+      if (aiRequestTokensRef.current[sessionId] === requestToken) {
+        setBusySessionIds((current) => ({
+          ...current,
+          [sessionId]: false,
+        }));
+      }
     }
   }
 
@@ -936,6 +1029,7 @@ function App() {
             <div>
               <p className="eyebrow">{t("ai.inspector")}</p>
               <h2>{t("ai.commandAdvisor")}</h2>
+              <p className="session-scope">{activeSessionLabel}</p>
             </div>
             <span className="safety-pill">
               <ShieldCheck size={14} />
@@ -973,7 +1067,11 @@ function App() {
               onChange={(event) => setAiQuestion(event.currentTarget.value)}
               placeholder={t("ai.askPlaceholder")}
             />
-            <button className="primary-button" type="submit" disabled={isAiBusy}>
+            <button
+              className="primary-button"
+              type="submit"
+              disabled={isAiBusy || !activeSessionId}
+            >
               {isAiBusy ? <Loader2 className="spin" size={16} /> : <Wand2 size={16} />}
               {t("ai.suggestCommands")}
             </button>
@@ -990,7 +1088,16 @@ function App() {
           </div>
 
           <div className="suggestion-list">
-            {suggestions.map((item) => (
+            {activeSuggestions.length === 0 && (
+              <p className="muted">
+                {activeSuggestionState === "loading"
+                  ? t("ai.generating")
+                  : activeSuggestionState === "empty"
+                    ? t("ai.noUsableSuggestions")
+                    : t("ai.noSuggestions")}
+              </p>
+            )}
+            {activeSuggestions.map((item) => (
               <SuggestionCard
                 key={item.id}
                 suggestion={item}
@@ -1007,8 +1114,8 @@ function App() {
               <Send size={16} />
               {t("ai.executionList")}
             </div>
-            {queue.length === 0 && <p className="muted">{t("ai.noQueued")}</p>}
-            {queue.map((item) => (
+            {activeQueue.length === 0 && <p className="muted">{t("ai.noQueued")}</p>}
+            {activeQueue.map((item) => (
               <div className="queue-item" key={item.id}>
                 <code>{item.command}</code>
                 <span className={`risk ${item.riskLevel}`}>
