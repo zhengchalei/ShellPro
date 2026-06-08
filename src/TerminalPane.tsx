@@ -2,31 +2,128 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Terminal } from "@xterm/xterm";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useRef } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+} from "react";
 import "@xterm/xterm/css/xterm.css";
 import { hasTauriRuntime, shellProApi } from "./api";
-import type { TerminalEvent, TerminalSession } from "./types";
+import type {
+  TerminalEvent,
+  TerminalPreferences,
+  TerminalSession,
+} from "./types";
+
+const darkTerminalTheme = {
+  background: "#0d1117",
+  foreground: "#e6edf3",
+  cursor: "#7dd3fc",
+  selectionBackground: "#315375",
+  black: "#0d1117",
+  red: "#ff7b72",
+  green: "#7ee787",
+  yellow: "#f2cc60",
+  blue: "#79c0ff",
+  magenta: "#d2a8ff",
+  cyan: "#a5d6ff",
+  white: "#f0f6fc",
+};
+
+const lightTerminalTheme = {
+  background: "#fbfbfd",
+  foreground: "#1f2937",
+  cursor: "#0567d8",
+  selectionBackground: "#bfdbfe",
+  black: "#111827",
+  red: "#b42318",
+  green: "#0f6a31",
+  yellow: "#8a5a00",
+  blue: "#075985",
+  magenta: "#7c3aed",
+  cyan: "#0f766e",
+  white: "#f9fafb",
+};
+
+function resolveTerminalTheme(preferences: TerminalPreferences) {
+  const systemPrefersDark =
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-color-scheme: dark)").matches;
+  const theme =
+    preferences.theme === "system"
+      ? systemPrefersDark
+        ? "dark"
+        : "light"
+      : preferences.theme;
+  return theme === "dark" ? darkTerminalTheme : lightTerminalTheme;
+}
+
+export type TerminalPaneHandle = {
+  clear: () => void;
+  findNext: (term: string) => boolean;
+  findPrevious: (term: string) => boolean;
+  focus: () => void;
+  getSelection: () => string;
+  writeInput: (data: string) => Promise<void>;
+};
 
 type TerminalPaneProps = {
   session: TerminalSession;
   active: boolean;
+  visible: boolean;
+  preferences: TerminalPreferences;
+  onActivate: () => void;
   onBufferChange: (sessionId: string, data: string) => void;
   onStatusChange: (sessionId: string, status: TerminalSession["status"]) => void;
   terminalHint: string;
   disconnectedMessage: string;
 };
 
-export function TerminalPane({
+export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
+  function TerminalPane(
+{
   session,
   active,
+  visible,
+  preferences,
+  onActivate,
   onBufferChange,
   onStatusChange,
   terminalHint,
   disconnectedMessage,
-}: TerminalPaneProps) {
+}: TerminalPaneProps,
+ref,
+) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const searchRef = useRef<SearchAddon | null>(null);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      clear: () => terminalRef.current?.clear(),
+      findNext: (term: string) =>
+        searchRef.current?.findNext(term, { incremental: false }) ?? false,
+      findPrevious: (term: string) =>
+        searchRef.current?.findPrevious(term, { incremental: false }) ?? false,
+      focus: () => terminalRef.current?.focus(),
+      getSelection: () => terminalRef.current?.getSelection() ?? "",
+      writeInput: async (data: string) => {
+        if (!data) {
+          return;
+        }
+        if (!hasTauriRuntime()) {
+          terminalRef.current?.write(data);
+          onBufferChange(session.id, data);
+          return;
+        }
+        await shellProApi.writeToSession(session.id, data);
+      },
+    }),
+    [onBufferChange, session.id],
+  );
 
   useEffect(() => {
     if (!containerRef.current) {
@@ -36,26 +133,12 @@ export function TerminalPane({
     const terminal = new Terminal({
       cursorBlink: true,
       convertEol: true,
-      scrollback: 5000,
-      fontFamily:
-        "'SF Mono', 'JetBrains Mono', Menlo, Monaco, Consolas, monospace",
-      fontSize: 13,
+      scrollback: preferences.scrollback,
+      fontFamily: preferences.fontFamily,
+      fontSize: preferences.fontSize,
       lineHeight: 1.18,
       letterSpacing: 0,
-      theme: {
-        background: "#0d1117",
-        foreground: "#e6edf3",
-        cursor: "#7dd3fc",
-        selectionBackground: "#315375",
-        black: "#0d1117",
-        red: "#ff7b72",
-        green: "#7ee787",
-        yellow: "#f2cc60",
-        blue: "#79c0ff",
-        magenta: "#d2a8ff",
-        cyan: "#a5d6ff",
-        white: "#f0f6fc",
-      },
+      theme: resolveTerminalTheme(preferences),
       allowProposedApi: true,
     });
     const fitAddon = new FitAddon();
@@ -79,6 +162,7 @@ export function TerminalPane({
 
     terminalRef.current = terminal;
     fitRef.current = fitAddon;
+    searchRef.current = searchAddon;
 
     const resize = () => {
       fitAddon.fit();
@@ -102,8 +186,21 @@ export function TerminalPane({
       terminal.dispose();
       terminalRef.current = null;
       fitRef.current = null;
+      searchRef.current = null;
     };
   }, [onBufferChange, session.id, session.title, terminalHint]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) {
+      return;
+    }
+    terminal.options.fontFamily = preferences.fontFamily;
+    terminal.options.fontSize = preferences.fontSize;
+    terminal.options.scrollback = preferences.scrollback;
+    terminal.options.theme = resolveTerminalTheme(preferences);
+    fitRef.current?.fit();
+  }, [preferences]);
 
   useEffect(() => {
     if (!hasTauriRuntime()) {
@@ -140,16 +237,29 @@ export function TerminalPane({
   }, [disconnectedMessage, onBufferChange, onStatusChange, session.id]);
 
   useEffect(() => {
-    if (active) {
-      terminalRef.current?.focus();
-      fitRef.current?.fit();
+    if (!visible) {
+      return;
     }
-  }, [active]);
+    const frame = requestAnimationFrame(() => {
+      fitRef.current?.fit();
+      if (active) {
+        terminalRef.current?.focus();
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [active, visible]);
 
   return (
     <div
-      className={`terminal-pane ${active ? "is-active" : ""}`}
+      className={[
+        "terminal-pane",
+        visible ? "is-visible" : "",
+        active ? "is-active" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      onMouseDown={onActivate}
       ref={containerRef}
     />
   );
-}
+});
