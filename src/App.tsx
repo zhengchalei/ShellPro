@@ -1,15 +1,7 @@
 import {
-  Bot,
-  Check,
   ChevronDown,
   Copy,
   Download,
-  FilePlus2,
-  FileKey2,
-  FileText,
-  Folder,
-  FolderOpen,
-  FolderPlus,
   FolderTree,
   Gauge,
   Laptop,
@@ -17,23 +9,18 @@ import {
   Loader2,
   MoreHorizontal,
   PanelLeft,
-  Pencil,
   Play,
   Plus,
   RefreshCcw,
-  Save,
   Search,
   Send,
   Server,
   Settings,
   Shuffle,
-  ShieldAlert,
   ShieldCheck,
   SplitSquareHorizontal,
   Star,
-  TerminalSquare,
   Trash2,
-  UploadCloud,
   Wand2,
   X,
 } from "lucide-react";
@@ -50,7 +37,54 @@ import {
 } from "react";
 import { shellProApi } from "./api";
 import "./App.css";
-import { Locale, useI18n } from "./i18n";
+import {
+  authTypeLabel,
+  clampNumber,
+  compactBuffer,
+  createEmptyProfile,
+  createTunnelDraft,
+  defaultTerminalPreferences,
+  quickCommandTemplates,
+  readCustomQuickCommands,
+  readRecentConnections,
+  readTerminalPreferences,
+  saveCustomQuickCommands,
+  saveRecentConnections,
+  saveTerminalPreferences,
+  updateRecentConnections,
+} from "./appState";
+import type {
+  FileContextMenuState,
+  ProfileFilters,
+  QuickCommandTemplate,
+  RecentConnection,
+  SuggestionState,
+  TerminalLayout,
+  TunnelDraft,
+  ViewMode,
+} from "./appTypes";
+import {
+  AiInspector,
+  type AiInspectorContextMode,
+} from "./components/AiInspector";
+import { FileContextMenu, FileExplorer } from "./components/FileExplorer";
+import { ProfileEditor } from "./components/ProfileEditor";
+import { SessionOverview } from "./components/SessionOverview";
+import {
+  SettingsView,
+  type AiSettingsDraft,
+} from "./components/SettingsView";
+import {
+  ConnectionRow,
+  EmptyWorkspace,
+  ShellProLogo,
+} from "./components/WorkspaceShell";
+import {
+  filesToUploads,
+  flattenFileEntries,
+  parentForFileAction,
+} from "./fileUtils";
+import { useI18n } from "./i18n";
 import { TerminalPane, type TerminalPaneHandle } from "./TerminalPane";
 import type {
   AiCommandSuggestion,
@@ -58,406 +92,14 @@ import type {
   CommandQueueItem,
   ConnectionProfile,
   ConnectionProfileInput,
-  ContextMode,
   RiskLevel,
-  SshTunnelInput,
   SshTunnelSession,
   TerminalPreferences,
   TerminalSession,
-  TerminalTheme,
   WorkspaceFileEntry,
   WorkspaceFileKind,
   WorkspaceFilePreview,
 } from "./types";
-
-type ViewMode = "workspace" | "connections" | "settings";
-type TerminalLayout = "single" | "split" | "grid";
-type SuggestionState = "idle" | "loading" | "empty" | "ready";
-type QuickCommandTemplate = {
-  id: string;
-  titleKey?: string;
-  title?: string;
-  command: string;
-  explanationKey?: string;
-  explanation?: string;
-  builtin?: boolean;
-};
-type RecentConnection = {
-  profileId: string;
-  name: string;
-  endpoint: string;
-  connectedAt: string;
-  count: number;
-};
-type ProfileFilters = {
-  group: string;
-  tag: string;
-  authType: "" | ConnectionProfile["authType"];
-  favoritesOnly: boolean;
-};
-type TunnelDraft = SshTunnelInput;
-type FileContextMenuState = {
-  x: number;
-  y: number;
-  entry: WorkspaceFileEntry | null;
-  parentPath: string | null;
-} | null;
-
-const recentConnectionsStorageKey = "shellpro.recentConnections";
-const terminalPreferencesStorageKey = "shellpro.terminalPreferences";
-const quickCommandsStorageKey = "shellpro.quickCommands";
-
-const defaultTerminalPreferences: TerminalPreferences = {
-  fontFamily:
-    "'SF Mono', 'JetBrains Mono', Menlo, Monaco, Consolas, monospace",
-  fontSize: 13,
-  scrollback: 5000,
-  theme: "system",
-};
-
-const terminalFontOptions = [
-  {
-    label: "SF Mono / JetBrains Mono / Menlo",
-    value: "'SF Mono', 'JetBrains Mono', Menlo, Monaco, Consolas, monospace",
-  },
-  {
-    label: "Cascadia Mono / Consolas",
-    value: "'Cascadia Mono', Consolas, 'Courier New', monospace",
-  },
-  {
-    label: "Fira Code / Consolas",
-    value: "'Fira Code', Consolas, 'Courier New', monospace",
-  },
-];
-
-const quickCommandTemplates: QuickCommandTemplate[] = [
-  {
-    id: "whoami",
-    titleKey: "quick.identity",
-    command: "whoami && hostname",
-    explanationKey: "quick.identityHelp",
-    builtin: true,
-  },
-  {
-    id: "pwd",
-    titleKey: "quick.currentDir",
-    command: "pwd && ls -la",
-    explanationKey: "quick.currentDirHelp",
-    builtin: true,
-  },
-  {
-    id: "disk",
-    titleKey: "quick.disk",
-    command: "df -h",
-    explanationKey: "quick.diskHelp",
-    builtin: true,
-  },
-  {
-    id: "memory",
-    titleKey: "quick.memory",
-    command: "free -h",
-    explanationKey: "quick.memoryHelp",
-    builtin: true,
-  },
-  {
-    id: "process",
-    titleKey: "quick.process",
-    command: "ps aux --sort=-%mem | head",
-    explanationKey: "quick.processHelp",
-    builtin: true,
-  },
-  {
-    id: "service",
-    titleKey: "quick.service",
-    command: "systemctl status",
-    explanationKey: "quick.serviceHelp",
-    builtin: true,
-  },
-];
-
-const emptyProfile: ConnectionProfileInput = {
-  name: "",
-  host: "",
-  port: 22,
-  username: "",
-  authType: "agent",
-  privateKeyPath: "",
-  groupId: "Production",
-  tags: [],
-  jumpHostId: "",
-  favorite: false,
-};
-
-function createEmptyProfile(): ConnectionProfileInput {
-  return {
-    ...emptyProfile,
-    tags: [],
-  };
-}
-
-function createTunnelDraft(profileId = ""): TunnelDraft {
-  return {
-    profileId,
-    localHost: "127.0.0.1",
-    localPort: 15432,
-    remoteHost: "127.0.0.1",
-    remotePort: 5432,
-  };
-}
-
-function compactBuffer(buffer: string, limit = 24000) {
-  if (buffer.length <= limit) {
-    return buffer;
-  }
-  return buffer.slice(buffer.length - limit);
-}
-
-function tagsToText(tags: string[]) {
-  return tags.join(", ");
-}
-
-function textToTags(value: string) {
-  return value
-    .split(",")
-    .map((tag) => tag.trim())
-    .filter(Boolean);
-}
-
-function clampNumber(value: number, min: number, max: number, fallback: number) {
-  if (!Number.isFinite(value)) {
-    return fallback;
-  }
-  return Math.min(max, Math.max(min, value));
-}
-
-function readTerminalPreferences(): TerminalPreferences {
-  if (typeof localStorage === "undefined") {
-    return defaultTerminalPreferences;
-  }
-
-  try {
-    const parsed = JSON.parse(
-      localStorage.getItem(terminalPreferencesStorageKey) ?? "{}",
-    ) as Partial<TerminalPreferences>;
-    const theme: TerminalTheme =
-      parsed.theme === "dark" || parsed.theme === "light" || parsed.theme === "system"
-        ? parsed.theme
-        : defaultTerminalPreferences.theme;
-    return {
-      fontFamily:
-        typeof parsed.fontFamily === "string" && parsed.fontFamily.trim()
-          ? parsed.fontFamily
-          : defaultTerminalPreferences.fontFamily,
-      fontSize: clampNumber(
-        Number(parsed.fontSize),
-        10,
-        22,
-        defaultTerminalPreferences.fontSize,
-      ),
-      scrollback: clampNumber(
-        Number(parsed.scrollback),
-        1000,
-        50000,
-        defaultTerminalPreferences.scrollback,
-      ),
-      theme,
-    };
-  } catch {
-    return defaultTerminalPreferences;
-  }
-}
-
-function saveTerminalPreferences(preferences: TerminalPreferences) {
-  if (typeof localStorage === "undefined") {
-    return;
-  }
-  localStorage.setItem(
-    terminalPreferencesStorageKey,
-    JSON.stringify(preferences),
-  );
-}
-
-function readCustomQuickCommands(): QuickCommandTemplate[] {
-  if (typeof localStorage === "undefined") {
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(
-      localStorage.getItem(quickCommandsStorageKey) ?? "[]",
-    );
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-    return parsed
-      .filter(
-        (item): item is QuickCommandTemplate =>
-          typeof item === "object" &&
-          item !== null &&
-          typeof item.id === "string" &&
-          typeof item.title === "string" &&
-          typeof item.command === "string",
-      )
-      .map((item) => ({
-        id: item.id,
-        title: item.title?.trim() || item.command,
-        command: item.command.trim(),
-        explanation: item.explanation?.trim() || "",
-        builtin: false,
-      }))
-      .filter((item) => item.command)
-      .slice(0, 24);
-  } catch {
-    return [];
-  }
-}
-
-function saveCustomQuickCommands(commands: QuickCommandTemplate[]) {
-  if (typeof localStorage === "undefined") {
-    return;
-  }
-  localStorage.setItem(
-    quickCommandsStorageKey,
-    JSON.stringify(commands.filter((command) => !command.builtin).slice(0, 24)),
-  );
-}
-
-function readRecentConnections(): RecentConnection[] {
-  if (typeof localStorage === "undefined") {
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(
-      localStorage.getItem(recentConnectionsStorageKey) ?? "[]",
-    );
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-    return parsed
-      .filter(
-        (item): item is RecentConnection =>
-          typeof item === "object" &&
-          item !== null &&
-          typeof item.profileId === "string" &&
-          typeof item.name === "string" &&
-          typeof item.endpoint === "string" &&
-          typeof item.connectedAt === "string" &&
-          typeof item.count === "number",
-      )
-      .slice(0, 8);
-  } catch {
-    return [];
-  }
-}
-
-function saveRecentConnections(connections: RecentConnection[]) {
-  if (typeof localStorage === "undefined") {
-    return;
-  }
-  localStorage.setItem(
-    recentConnectionsStorageKey,
-    JSON.stringify(connections.slice(0, 8)),
-  );
-}
-
-function updateRecentConnections(
-  current: RecentConnection[],
-  profile: ConnectionProfile,
-) {
-  const existing = current.find((item) => item.profileId === profile.id);
-  const next: RecentConnection = {
-    profileId: profile.id,
-    name: profile.name,
-    endpoint: `${profile.username}@${profile.host}:${profile.port}`,
-    connectedAt: new Date().toISOString(),
-    count: (existing?.count ?? 0) + 1,
-  };
-  return [
-    next,
-    ...current.filter((item) => item.profileId !== profile.id),
-  ].slice(0, 8);
-}
-
-function flattenFileEntries(entries: WorkspaceFileEntry[]) {
-  const output: WorkspaceFileEntry[] = [];
-
-  const visit = (entry: WorkspaceFileEntry) => {
-    output.push(entry);
-    entry.children?.forEach(visit);
-  };
-
-  entries.forEach(visit);
-  return output;
-}
-
-function formatFileSize(size?: number | null) {
-  if (size === null || size === undefined) {
-    return "";
-  }
-  if (size < 1024) {
-    return `${size} B`;
-  }
-  const units = ["KB", "MB", "GB"];
-  let value = size / 1024;
-  let unitIndex = 0;
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
-}
-
-function formatFileDate(value?: string | null) {
-  if (!value) {
-    return "";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "";
-  }
-  return date.toLocaleString();
-}
-
-function parentForFileAction(entry: WorkspaceFileEntry | null, fallback: string | null) {
-  if (!entry) {
-    return fallback;
-  }
-  return entry.kind === "directory" ? entry.path : entry.parentPath ?? fallback;
-}
-
-async function filesToUploads(
-  parentPath: string | null,
-  files: File[],
-  onStatus: (message: string) => void,
-) {
-  const paths = files
-    .map((file) => (file as File & { path?: string }).path)
-    .filter((path): path is string => Boolean(path));
-
-  if (paths.length === files.length && paths.length > 0) {
-    await shellProApi.uploadWorkspaceFiles(parentPath, paths);
-    return;
-  }
-
-  for (const file of files) {
-    const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
-    await shellProApi.writeWorkspaceFile(parentPath, file.name, bytes);
-    onStatus(`${file.name} uploaded`);
-  }
-}
-
-function authTypeLabel(
-  authType: ConnectionProfile["authType"],
-  t: (key: string, values?: Record<string, string | number>) => string,
-) {
-  const labels: Record<ConnectionProfile["authType"], string> = {
-    agent: t("profile.authAgent"),
-    privateKey: t("profile.authPrivateKey"),
-    password: t("profile.authPassword"),
-  };
-  return labels[authType];
-}
 
 function App() {
   const { locale, setLocale, t } = useI18n();
@@ -523,9 +165,8 @@ function App() {
   >({});
   const [queue, setQueue] = useState<CommandQueueItem[]>([]);
   const [contextPreview, setContextPreview] = useState("");
-  const [selectedContextMode, setSelectedContextMode] = useState<
-    "recent" | "selected"
-  >("recent");
+  const [selectedContextMode, setSelectedContextMode] =
+    useState<AiInspectorContextMode>("recent");
   const [manualSelection, setManualSelection] = useState("");
   const [statusMessage, setStatusMessage] = useState(t("app.ready"));
   const [busySessionIds, setBusySessionIds] = useState<Record<string, boolean>>(
@@ -547,14 +188,7 @@ function App() {
   );
   const aiRequestTokensRef = useRef<Record<string, number>>({});
   const activeSessionIdRef = useRef<string | null>(null);
-  const [aiDraft, setAiDraft] = useState<{
-    name: string;
-    baseUrl: string;
-    model: string;
-    contextMode: ContextMode;
-    recentLineLimit: number;
-    redactSecrets: boolean;
-  }>({
+  const [aiDraft, setAiDraft] = useState<AiSettingsDraft>({
     name: "DeepSeek",
     baseUrl: "https://api.deepseek.com",
     model: "deepseek-v4-flash",
@@ -1448,6 +1082,16 @@ function App() {
     }
   }
 
+  function cancelQueueItem(itemId: string) {
+    setQueue((current) =>
+      current.map((queueItem) =>
+        queueItem.id === itemId
+          ? { ...queueItem, status: "cancelled" }
+          : queueItem,
+      ),
+    );
+  }
+
   async function fillTerminal(command: string) {
     if (await writeToActiveTerminal(command)) {
       setStatusMessage(t("terminal.filled"));
@@ -2308,232 +1952,20 @@ function App() {
         )}
 
         {viewMode === "settings" && (
-          <section className="management-view settings-view">
-            <div className="view-header">
-              <div>
-                <p className="eyebrow">{t("settings.preferences")}</p>
-                <h1>{t("settings.title")}</h1>
-              </div>
-            </div>
-            <div className="settings-grid">
-              <div className="settings-panel">
-                <div className="panel-title">
-                  <Settings size={17} />
-                  {t("settings.language")}
-                </div>
-                <label>
-                  {t("settings.language")}
-                  <select
-                    value={locale}
-                    onChange={(event) =>
-                      setLocale(event.currentTarget.value as Locale)
-                    }
-                  >
-                    <option value="en-US">{t("settings.languageEn")}</option>
-                    <option value="zh-CN">{t("settings.languageZh")}</option>
-                  </select>
-                </label>
-              </div>
-
-              <form className="settings-panel" onSubmit={saveAiSettings}>
-                <div className="panel-title">
-                  <Bot size={17} />
-                  {t("settings.aiProvider")}
-                </div>
-                <label>
-                  {t("profile.name")}
-                  <input
-                    value={aiDraft.name}
-                    onChange={(event) =>
-                      setAiDraft({ ...aiDraft, name: event.currentTarget.value })
-                    }
-                  />
-                </label>
-                <label>
-                  {t("settings.baseUrl")}
-                  <input
-                    value={aiDraft.baseUrl}
-                    onChange={(event) =>
-                      setAiDraft({
-                        ...aiDraft,
-                        baseUrl: event.currentTarget.value,
-                      })
-                    }
-                  />
-                </label>
-                <label>
-                  {t("settings.model")}
-                  <input
-                    value={aiDraft.model}
-                    onChange={(event) =>
-                      setAiDraft({ ...aiDraft, model: event.currentTarget.value })
-                    }
-                  />
-                </label>
-                <label>
-                  {t("settings.apiKey")}
-                  <input
-                    type="password"
-                    value={aiKeyDraft}
-                    placeholder={
-                      aiConfig?.apiKeySecretRef
-                        ? t("settings.storedKeychain")
-                        : t("settings.notConfigured")
-                    }
-                    onChange={(event) => setAiKeyDraft(event.currentTarget.value)}
-                  />
-                </label>
-                <div className="split-fields">
-                  <label>
-                    {t("settings.context")}
-                    <select
-                      value={aiDraft.contextMode}
-                      onChange={(event) =>
-                        setAiDraft({
-                          ...aiDraft,
-                          contextMode: event.currentTarget
-                            .value as typeof aiDraft.contextMode,
-                        })
-                      }
-                    >
-                      <option value="selected">{t("settings.selectedText")}</option>
-                      <option value="recentLines">{t("settings.recentLines")}</option>
-                      <option value="fullBuffer">{t("settings.fullBuffer")}</option>
-                    </select>
-                  </label>
-                  <label>
-                    {t("settings.lines")}
-                    <input
-                      type="number"
-                      min={20}
-                      max={5000}
-                      value={aiDraft.recentLineLimit}
-                      onChange={(event) =>
-                        setAiDraft({
-                          ...aiDraft,
-                          recentLineLimit: Number(event.currentTarget.value),
-                        })
-                      }
-                    />
-                  </label>
-                </div>
-                <label className="check-row">
-                  <input
-                    type="checkbox"
-                    checked={aiDraft.redactSecrets}
-                    onChange={(event) =>
-                      setAiDraft({
-                        ...aiDraft,
-                        redactSecrets: event.currentTarget.checked,
-                      })
-                    }
-                  />
-                  {t("settings.redactSecrets")}
-                </label>
-                <button className="primary-button" type="submit">
-                  <Save size={16} />
-                  {t("settings.saveAi")}
-                </button>
-              </form>
-
-              <div className="settings-panel">
-                <div className="panel-title">
-                  <TerminalSquare size={17} />
-                  {t("settings.terminal")}
-                </div>
-                <label>
-                  {t("settings.font")}
-                  <select
-                    value={terminalPreferences.fontFamily}
-                    onChange={(event) =>
-                      updateTerminalPreferences({
-                        fontFamily: event.currentTarget.value,
-                      })
-                    }
-                  >
-                    {terminalFontOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <div className="split-fields">
-                  <label>
-                    {t("settings.fontSize")}
-                    <input
-                      type="number"
-                      min={10}
-                      max={22}
-                      value={terminalPreferences.fontSize}
-                      onChange={(event) =>
-                        updateTerminalPreferences({
-                          fontSize: Number(event.currentTarget.value),
-                        })
-                      }
-                    />
-                  </label>
-                  <label>
-                    {t("settings.scrollback")}
-                    <input
-                      type="number"
-                      min={1000}
-                      max={50000}
-                      step={1000}
-                      value={terminalPreferences.scrollback}
-                      onChange={(event) =>
-                        updateTerminalPreferences({
-                          scrollback: Number(event.currentTarget.value),
-                        })
-                      }
-                    />
-                  </label>
-                </div>
-                <label>
-                  {t("settings.theme")}
-                  <select
-                    value={terminalPreferences.theme}
-                    onChange={(event) =>
-                      updateTerminalPreferences({
-                        theme: event.currentTarget.value as TerminalTheme,
-                      })
-                    }
-                  >
-                    <option value="system">{t("settings.followsSystem")}</option>
-                    <option value="dark">{t("settings.themeDark")}</option>
-                    <option value="light">{t("settings.themeLight")}</option>
-                  </select>
-                </label>
-                <button
-                  className="secondary-button"
-                  type="button"
-                  onClick={resetTerminalPreferences}
-                >
-                  <RefreshCcw size={16} />
-                  {t("settings.restoreTerminalDefaults")}
-                </button>
-              </div>
-
-              <div className="settings-panel">
-                <div className="panel-title">
-                  <ShieldCheck size={17} />
-                  {t("settings.security")}
-                </div>
-                <div className="preference-row">
-                  <span>{t("settings.credentials")}</span>
-                  <strong>{t("settings.systemKeychain")}</strong>
-                </div>
-                <div className="preference-row">
-                  <span>{t("settings.aiExecution")}</span>
-                  <strong>{t("settings.manualOnly")}</strong>
-                </div>
-                <div className="preference-row">
-                  <span>{t("settings.highRiskCommands")}</span>
-                  <strong>{t("settings.confirmEveryTime")}</strong>
-                </div>
-              </div>
-            </div>
-          </section>
+          <SettingsView
+            locale={locale}
+            onLocaleChange={setLocale}
+            aiConfig={aiConfig}
+            aiDraft={aiDraft}
+            onAiDraftChange={setAiDraft}
+            aiKeyDraft={aiKeyDraft}
+            onAiKeyDraftChange={setAiKeyDraft}
+            onSaveAiSettings={saveAiSettings}
+            terminalPreferences={terminalPreferences}
+            onTerminalPreferencesChange={updateTerminalPreferences}
+            onResetTerminalPreferences={resetTerminalPreferences}
+            t={t}
+          />
         )}
       </main>
 
@@ -2704,144 +2136,35 @@ function App() {
       )}
 
       {isInspectorVisible && (
-        <aside className="inspector">
-          <div className="inspector-header">
-            <div>
-              <p className="eyebrow">{t("ai.inspector")}</p>
-              <h2>{t("ai.commandAdvisor")}</h2>
-              <p className="session-scope">{activeSessionLabel}</p>
-            </div>
-            <span className="safety-pill">
-              <ShieldCheck size={14} />
-              {t("ai.manual")}
-            </span>
-          </div>
-
-          <form className="ai-form" onSubmit={askAi}>
-            <div className="segmented">
-              <button
-                type="button"
-                className={selectedContextMode === "recent" ? "active" : ""}
-                onClick={() => setSelectedContextMode("recent")}
-              >
-                {t("ai.recent")}
-              </button>
-              <button
-                type="button"
-                className={selectedContextMode === "selected" ? "active" : ""}
-                onClick={() => setSelectedContextMode("selected")}
-              >
-                {t("ai.selected")}
-              </button>
-            </div>
-            {selectedContextMode === "selected" && (
-              <textarea
-                className="context-input"
-                value={manualSelection}
-                onChange={(event) => setManualSelection(event.currentTarget.value)}
-                placeholder={t("ai.pasteSelected")}
-              />
-            )}
-            <textarea
-              value={aiQuestion}
-              onChange={(event) => setAiQuestion(event.currentTarget.value)}
-              placeholder={t("ai.askPlaceholder")}
-            />
-            <button
-              className="primary-button"
-              type="submit"
-              disabled={isAiBusy || !activeSessionId}
-            >
-              {isAiBusy ? <Loader2 className="spin" size={16} /> : <Wand2 size={16} />}
-              {t("ai.suggestCommands")}
-            </button>
-          </form>
-
-          <QuickCommandPanel
-            templates={quickCommands}
-            disabled={!activeSessionId}
-            draft={quickCommandDraft}
-            onDraftChange={setQuickCommandDraft}
-            onAdd={addQuickCommand}
-            onDelete={deleteQuickCommand}
-            onQueue={queueQuickCommand}
-            onFill={fillTerminal}
-            t={t}
-          />
-
-          <div className="context-preview">
-            <div className="panel-title">
-              <ShieldAlert size={16} />
-              {t("ai.contextPreview")}
-            </div>
-            <pre ref={contextPreviewRef}>
-              {contextPreview || t("ai.openTerminalContext")}
-            </pre>
-          </div>
-
-          <div className="suggestion-list">
-            {activeSuggestions.length === 0 && (
-              <p className="muted">
-                {activeSuggestionState === "loading"
-                  ? t("ai.generating")
-                  : activeSuggestionState === "empty"
-                    ? t("ai.noUsableSuggestions")
-                    : t("ai.noSuggestions")}
-              </p>
-            )}
-            {activeSuggestions.map((item) => (
-              <SuggestionCard
-                key={item.id}
-                suggestion={item}
-                onQueue={() => void queueSuggestion(item)}
-                onFill={() => void fillTerminal(item.command)}
-                t={t}
-                riskLabel={riskLabel}
-              />
-            ))}
-          </div>
-
-          <div className="queue-list">
-            <div className="panel-title">
-              <Send size={16} />
-              {t("ai.executionList")}
-            </div>
-            {activeQueue.length === 0 && <p className="muted">{t("ai.noQueued")}</p>}
-            {activeQueue.map((item) => (
-              <div className="queue-item" key={item.id}>
-                <code>{item.command}</code>
-                <span className={`risk ${item.riskLevel}`}>
-                  {riskLabel[item.riskLevel]}
-                </span>
-                <div className="queue-actions">
-                  <button
-                    className="mini-button"
-                    disabled={item.status !== "pending"}
-                    onClick={() => void executeQueueItem(item)}
-                  >
-                    <Play size={13} />
-                    {t("ai.execute")}
-                  </button>
-                  <button
-                    className="icon-button"
-                    title={t("ai.cancel")}
-                    onClick={() =>
-                      setQueue((current) =>
-                        current.map((queueItem) =>
-                          queueItem.id === item.id
-                            ? { ...queueItem, status: "cancelled" }
-                            : queueItem,
-                        ),
-                      )
-                    }
-                  >
-                    <X size={13} />
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </aside>
+        <AiInspector
+          activeSessionLabel={activeSessionLabel}
+          selectedContextMode={selectedContextMode}
+          onSelectedContextModeChange={setSelectedContextMode}
+          manualSelection={manualSelection}
+          onManualSelectionChange={setManualSelection}
+          aiQuestion={aiQuestion}
+          onAiQuestionChange={setAiQuestion}
+          onAskAi={askAi}
+          isAiBusy={isAiBusy}
+          hasActiveSession={Boolean(activeSessionId)}
+          quickCommands={quickCommands}
+          quickCommandDraft={quickCommandDraft}
+          onQuickCommandDraftChange={setQuickCommandDraft}
+          onAddQuickCommand={addQuickCommand}
+          onDeleteQuickCommand={deleteQuickCommand}
+          onQueueQuickCommand={queueQuickCommand}
+          onFillTerminal={fillTerminal}
+          contextPreview={contextPreview}
+          contextPreviewRef={contextPreviewRef}
+          activeSuggestions={activeSuggestions}
+          activeSuggestionState={activeSuggestionState}
+          onQueueSuggestion={(suggestion) => void queueSuggestion(suggestion)}
+          riskLabel={riskLabel}
+          activeQueue={activeQueue}
+          onExecuteQueueItem={(item) => void executeQueueItem(item)}
+          onCancelQueueItem={cancelQueueItem}
+          t={t}
+        />
       )}
 
       <footer className="statusbar">
@@ -2852,935 +2175,6 @@ function App() {
             : t("app.noActiveSession")}
         </span>
       </footer>
-    </div>
-  );
-}
-
-function SessionOverview({
-  sessions,
-  activeSessionId,
-  terminalLayout,
-  connectedCount,
-  visibleCount,
-  onSelect,
-  onLayoutChange,
-  t,
-}: {
-  sessions: TerminalSession[];
-  activeSessionId: string | null;
-  terminalLayout: TerminalLayout;
-  connectedCount: number;
-  visibleCount: number;
-  onSelect: (sessionId: string) => void;
-  onLayoutChange: (layout: TerminalLayout) => void;
-  t: (key: string, values?: Record<string, string | number>) => string;
-}) {
-  const activeSession =
-    sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
-  const sshCount = sessions.filter((session) => session.kind === "ssh").length;
-
-  return (
-    <div className="session-overview">
-      <div className="session-metrics">
-        <div className="session-metric">
-          <TerminalSquare size={15} />
-          <strong>{sessions.length}</strong>
-          <span>{t("workspace.sessions")}</span>
-        </div>
-        <div className="session-metric">
-          <ShieldCheck size={15} />
-          <strong>{connectedCount}</strong>
-          <span>{t("workspace.connected")}</span>
-        </div>
-        <div className="session-metric">
-          <Server size={15} />
-          <strong>{sshCount}</strong>
-          <span>{t("workspace.sshSessions")}</span>
-        </div>
-      </div>
-
-      <div className="session-overview-main">
-        <span className={`status-dot ${activeSession.status}`} />
-        <div>
-          <strong>{activeSession.title}</strong>
-          <span>
-            {t(`session.${activeSession.kind}`)} ·{" "}
-            {t(`session.${activeSession.status}`)}
-          </span>
-        </div>
-      </div>
-
-      <div className="session-pickers">
-        <select
-          value={activeSession.id}
-          onChange={(event) => onSelect(event.currentTarget.value)}
-          title={t("workspace.activeSession")}
-        >
-          {sessions.map((session) => (
-            <option key={session.id} value={session.id}>
-              {session.title}
-            </option>
-          ))}
-        </select>
-        <div className="layout-switch" aria-label={t("workspace.layout")}>
-          {(["single", "split", "grid"] as TerminalLayout[]).map((layout) => (
-            <button
-              key={layout}
-              className={terminalLayout === layout ? "active" : ""}
-              type="button"
-              title={t(`layout.${layout}`)}
-              onClick={() => onLayoutChange(layout)}
-            >
-              {layout === "single" ? "1" : layout === "split" ? "2" : "4"}
-            </button>
-          ))}
-        </div>
-        <span className="visible-pane-count">
-          {t("workspace.visiblePanes", { count: visibleCount })}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-function FileExplorer({
-  entries,
-  workspaceRoot,
-  selectedPath,
-  preview,
-  expandedDirPaths,
-  dropTargetPath,
-  isBusy,
-  onSelect,
-  onToggleDirectory,
-  onContextMenu,
-  onCreate,
-  onUpload,
-  onDragOver,
-  onDragLeave,
-  onDrop,
-  t,
-}: {
-  entries: WorkspaceFileEntry[];
-  workspaceRoot: string;
-  selectedPath: string | null;
-  preview: WorkspaceFilePreview | null;
-  expandedDirPaths: Record<string, boolean>;
-  dropTargetPath: string | null;
-  isBusy: boolean;
-  onSelect: (entry: WorkspaceFileEntry) => void;
-  onToggleDirectory: (path: string) => void;
-  onContextMenu: (
-    event: MouseEvent,
-    entry: WorkspaceFileEntry | null,
-    parentPath: string | null,
-  ) => void;
-  onCreate: (
-    target: WorkspaceFileEntry | null,
-    kind: WorkspaceFileKind,
-  ) => Promise<void>;
-  onUpload: (parentPath: string | null) => void;
-  onDragOver: (event: DragEvent, parentPath: string | null) => void;
-  onDragLeave: () => void;
-  onDrop: (event: DragEvent, parentPath: string | null) => void;
-  t: (key: string, values?: Record<string, string | number>) => string;
-}) {
-  const selectedEntry = useMemo(
-    () => flattenFileEntries(entries).find((entry) => entry.path === selectedPath) ?? null,
-    [entries, selectedPath],
-  );
-  const selectedChildCount = selectedEntry?.children?.length ?? 0;
-
-  return (
-    <section
-      className="sidebar-section file-browser"
-      onContextMenu={(event) => onContextMenu(event, null, workspaceRoot || null)}
-      onDragOver={(event) => onDragOver(event, workspaceRoot || null)}
-      onDragLeave={onDragLeave}
-      onDrop={(event) => onDrop(event, workspaceRoot || null)}
-    >
-      <div className="file-browser-head">
-        <div className="section-title">
-          <FolderTree size={14} />
-          {t("files.title")}
-        </div>
-        <div className="file-actions">
-          <button
-            className="icon-button compact"
-            title={t("files.newFile")}
-            onClick={(event) => {
-              event.stopPropagation();
-              void onCreate(null, "file");
-            }}
-            disabled={isBusy}
-          >
-            <FilePlus2 size={13} />
-          </button>
-          <button
-            className="icon-button compact"
-            title={t("files.newFolder")}
-            onClick={(event) => {
-              event.stopPropagation();
-              void onCreate(null, "directory");
-            }}
-            disabled={isBusy}
-          >
-            <FolderPlus size={13} />
-          </button>
-          <button
-            className="icon-button compact"
-            title={t("files.upload")}
-            onClick={(event) => {
-              event.stopPropagation();
-              onUpload(workspaceRoot || null);
-            }}
-            disabled={isBusy}
-          >
-            <UploadCloud size={13} />
-          </button>
-        </div>
-      </div>
-
-      <div
-        className={
-          dropTargetPath === workspaceRoot ? "file-tree root is-drop-target" : "file-tree root"
-        }
-      >
-        <div className="file-root-label" title={workspaceRoot}>
-          {workspaceRoot || t("files.workspaceRoot")}
-        </div>
-        {entries.length === 0 ? (
-          <p className="muted tight file-empty">{t("files.empty")}</p>
-        ) : (
-          entries.map((entry) => (
-            <FileTreeNode
-              key={entry.path}
-              entry={entry}
-              level={0}
-              selectedPath={selectedPath}
-              expandedDirPaths={expandedDirPaths}
-              dropTargetPath={dropTargetPath}
-              onSelect={onSelect}
-              onToggleDirectory={onToggleDirectory}
-              onContextMenu={onContextMenu}
-              onDragOver={onDragOver}
-              onDragLeave={onDragLeave}
-              onDrop={onDrop}
-            />
-          ))
-        )}
-      </div>
-
-      <div className="file-preview">
-        <div className="panel-title">
-          <FileText size={15} />
-          {t("files.preview")}
-        </div>
-        {!preview ? (
-          <p className="muted tight">{t("files.previewEmpty")}</p>
-        ) : (
-          <div className="file-preview-body">
-            <div className="file-preview-meta">
-              <strong>{preview.name}</strong>
-              <span>
-                {preview.kind === "directory"
-                  ? t("files.folderMeta", { count: selectedChildCount })
-                  : formatFileSize(preview.size)}
-              </span>
-              {formatFileDate(preview.modifiedAt) && (
-                <span>{formatFileDate(preview.modifiedAt)}</span>
-              )}
-            </div>
-            {preview.kind === "directory" ? (
-              <p className="muted tight">
-                {t("files.folderPreview", { count: selectedChildCount })}
-              </p>
-            ) : preview.content ? (
-              <pre>{preview.content}</pre>
-            ) : (
-              <p className="muted tight">{t("files.binaryPreview")}</p>
-            )}
-            {preview.truncated && (
-              <p className="muted tight">{t("files.previewTruncated")}</p>
-            )}
-          </div>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function FileTreeNode({
-  entry,
-  level,
-  selectedPath,
-  expandedDirPaths,
-  dropTargetPath,
-  onSelect,
-  onToggleDirectory,
-  onContextMenu,
-  onDragOver,
-  onDragLeave,
-  onDrop,
-}: {
-  entry: WorkspaceFileEntry;
-  level: number;
-  selectedPath: string | null;
-  expandedDirPaths: Record<string, boolean>;
-  dropTargetPath: string | null;
-  onSelect: (entry: WorkspaceFileEntry) => void;
-  onToggleDirectory: (path: string) => void;
-  onContextMenu: (
-    event: MouseEvent,
-    entry: WorkspaceFileEntry | null,
-    parentPath: string | null,
-  ) => void;
-  onDragOver: (event: DragEvent, parentPath: string | null) => void;
-  onDragLeave: () => void;
-  onDrop: (event: DragEvent, parentPath: string | null) => void;
-}) {
-  const isDirectory = entry.kind === "directory";
-  const isExpanded = Boolean(expandedDirPaths[entry.path]);
-  const childEntries = entry.children ?? [];
-  const targetDropPath = isDirectory ? entry.path : entry.parentPath ?? null;
-  const isDropTarget = Boolean(targetDropPath && dropTargetPath === targetDropPath);
-
-  return (
-    <div className="file-node-wrap">
-      <button
-        className={[
-          "file-node",
-          selectedPath === entry.path ? "selected" : "",
-          isDropTarget ? "is-drop-target" : "",
-        ]
-          .filter(Boolean)
-          .join(" ")}
-        style={{ paddingLeft: 8 + level * 14 }}
-        onClick={(event) => {
-          event.stopPropagation();
-          onSelect(entry);
-        }}
-        onContextMenu={(event) => onContextMenu(event, entry, entry.parentPath ?? null)}
-        onDragOver={(event) => {
-          onDragOver(event, targetDropPath);
-        }}
-        onDragLeave={onDragLeave}
-        onDrop={(event) => {
-          onDrop(event, targetDropPath);
-        }}
-      >
-        <span
-          className="file-disclosure"
-          onClick={(event) => {
-            if (!isDirectory) {
-              return;
-            }
-            event.stopPropagation();
-            onToggleDirectory(entry.path);
-          }}
-        >
-          {isDirectory ? <ChevronDown size={12} /> : null}
-        </span>
-        {isDirectory ? (
-          isExpanded ? (
-            <FolderOpen size={14} />
-          ) : (
-            <Folder size={14} />
-          )
-        ) : (
-          <FileText size={14} />
-        )}
-        <span>{entry.name}</span>
-      </button>
-      {isDirectory && isExpanded && childEntries.length > 0 && (
-        <div className="file-children">
-          {childEntries.map((child) => (
-            <FileTreeNode
-              key={child.path}
-              entry={child}
-              level={level + 1}
-              selectedPath={selectedPath}
-              expandedDirPaths={expandedDirPaths}
-              dropTargetPath={dropTargetPath}
-              onSelect={onSelect}
-              onToggleDirectory={onToggleDirectory}
-              onContextMenu={onContextMenu}
-              onDragOver={onDragOver}
-              onDragLeave={onDragLeave}
-              onDrop={onDrop}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function FileContextMenu({
-  state,
-  onCreate,
-  onRename,
-  onDelete,
-  onUpload,
-  onClose,
-  t,
-}: {
-  state: NonNullable<FileContextMenuState>;
-  onCreate: (
-    target: WorkspaceFileEntry | null,
-    kind: WorkspaceFileKind,
-  ) => Promise<void>;
-  onRename: (entry: WorkspaceFileEntry) => Promise<void>;
-  onDelete: (entry: WorkspaceFileEntry) => Promise<void>;
-  onUpload: (parentPath: string | null) => void;
-  onClose: () => void;
-  t: (key: string, values?: Record<string, string | number>) => string;
-}) {
-  const uploadParent = parentForFileAction(state.entry, state.parentPath);
-  const entry = state.entry;
-
-  return (
-    <div
-      className="context-menu file-context-menu"
-      style={{ left: state.x, top: state.y }}
-      onClick={(event) => event.stopPropagation()}
-      role="menu"
-    >
-      <button
-        role="menuitem"
-        onClick={() => {
-          onClose();
-          void onCreate(state.entry, "file");
-        }}
-      >
-        <FilePlus2 size={14} />
-        {t("files.newFile")}
-      </button>
-      <button
-        role="menuitem"
-        onClick={() => {
-          onClose();
-          void onCreate(state.entry, "directory");
-        }}
-      >
-        <FolderPlus size={14} />
-        {t("files.newFolder")}
-      </button>
-      <button
-        role="menuitem"
-        onClick={() => {
-          onClose();
-          onUpload(uploadParent);
-        }}
-      >
-        <UploadCloud size={14} />
-        {t("files.upload")}
-      </button>
-      {entry && (
-        <>
-          <div className="context-menu-divider" />
-          <button
-            role="menuitem"
-            onClick={() => {
-              onClose();
-              void onRename(entry);
-            }}
-          >
-            <Pencil size={14} />
-            {t("files.rename")}
-          </button>
-          <button
-            className="danger"
-            role="menuitem"
-            onClick={() => {
-              onClose();
-              void onDelete(entry);
-            }}
-          >
-            <Trash2 size={14} />
-            {t("files.delete")}
-          </button>
-        </>
-      )}
-    </div>
-  );
-}
-
-function ConnectionRow({
-  profile,
-  onConnect,
-  onEdit,
-  t,
-}: {
-  profile: ConnectionProfile;
-  onConnect: () => void;
-  onEdit: () => void;
-  t: (key: string, values?: Record<string, string | number>) => string;
-}) {
-  return (
-    <div className="connection-row">
-      <button onClick={onConnect}>
-        <Server size={15} />
-        <span>{profile.name}</span>
-      </button>
-      <button
-        className="icon-button compact"
-        title={t("connections.edit")}
-        onClick={onEdit}
-      >
-        <Settings size={13} />
-      </button>
-    </div>
-  );
-}
-
-function ShellProLogo({ size = "normal" }: { size?: "compact" | "normal" | "large" }) {
-  return (
-    <span className={`logo-mark ${size}`} aria-hidden="true">
-      <svg viewBox="0 0 64 64" focusable="false">
-        <rect className="logo-shell" x="7" y="9" width="50" height="46" rx="10" />
-        <path className="logo-window" d="M14 20h36" />
-        <path className="logo-prompt" d="M18 33l7 6-7 6" />
-        <path className="logo-cursor" d="M31 45h12" />
-        <path className="logo-bolt" d="M39 16 30 34h10l-6 15 17-25H40l6-8Z" />
-      </svg>
-    </span>
-  );
-}
-
-function EmptyWorkspace({
-  onLocal,
-  onSsh,
-  onImport,
-  t,
-}: {
-  onLocal: () => void;
-  onSsh: () => void;
-  onImport: () => void;
-  t: (key: string, values?: Record<string, string | number>) => string;
-}) {
-  return (
-    <div className="empty-workspace">
-      <ShellProLogo size="large" />
-      <h1>ShellPro</h1>
-      <p>{t("workspace.startDescription")}</p>
-      <div className="empty-actions">
-        <button className="primary-button" onClick={onLocal}>
-          <TerminalSquare size={17} />
-          {t("workspace.newLocal")}
-        </button>
-        <button className="secondary-button" onClick={onSsh}>
-          <Server size={17} />
-          {t("workspace.newSsh")}
-        </button>
-        <button className="secondary-button" onClick={onImport}>
-          <Download size={17} />
-          {t("workspace.importConfig")}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function ProfileEditor({
-  draft,
-  profiles,
-  secretDraft,
-  setSecretDraft,
-  onChange,
-  onSubmit,
-  onCancel,
-  onTest,
-  isEditing,
-  isTesting,
-  t,
-}: {
-  draft: ConnectionProfileInput;
-  profiles: ConnectionProfile[];
-  secretDraft: string;
-  setSecretDraft: (value: string) => void;
-  onChange: (draft: ConnectionProfileInput) => void;
-  onSubmit: (event: FormEvent) => void;
-  onCancel: () => void;
-  onTest: () => void;
-  isEditing: boolean;
-  isTesting: boolean;
-  t: (key: string, values?: Record<string, string | number>) => string;
-}) {
-  const showPrivateKey = draft.authType === "privateKey";
-  const showSecret = draft.authType !== "agent";
-  const secretLabel =
-    draft.authType === "password"
-      ? t("profile.password")
-      : t("profile.passphrase");
-  const jumpHostOptions = profiles.filter((profile) => profile.id !== draft.id);
-
-  return (
-    <form className="profile-editor" onSubmit={onSubmit}>
-      <div className="profile-editor-head">
-        <div>
-          <p className="eyebrow">{t("profile.detail")}</p>
-          <h2 id="profile-dialog-title">
-            {isEditing ? t("profile.editTitle") : t("profile.createTitle")}
-          </h2>
-        </div>
-        <button
-          className="icon-button"
-          type="button"
-          title={t("profile.cancel")}
-          onClick={onCancel}
-        >
-          <X size={15} />
-        </button>
-      </div>
-
-      <section className="form-section">
-        <div className="panel-title">
-          <Server size={17} />
-          {t("profile.basicSection")}
-        </div>
-        <label>
-          {t("profile.name")}
-          <input
-            value={draft.name}
-            onChange={(event) =>
-              onChange({ ...draft, name: event.currentTarget.value })
-            }
-            placeholder={t("profile.namePlaceholder")}
-          />
-        </label>
-        <div className="form-grid host-grid">
-          <label>
-            {t("profile.host")}
-            <input
-              value={draft.host}
-              onChange={(event) =>
-                onChange({ ...draft, host: event.currentTarget.value })
-              }
-              placeholder={t("profile.hostPlaceholder")}
-            />
-          </label>
-          <label>
-            {t("profile.port")}
-            <input
-              type="number"
-              min={1}
-              max={65535}
-              value={draft.port}
-              onChange={(event) =>
-                onChange({ ...draft, port: Number(event.currentTarget.value) })
-              }
-            />
-          </label>
-        </div>
-        <label>
-          {t("profile.username")}
-          <input
-            value={draft.username}
-            onChange={(event) =>
-              onChange({ ...draft, username: event.currentTarget.value })
-            }
-            placeholder={t("profile.usernamePlaceholder")}
-          />
-        </label>
-      </section>
-
-      <section className="form-section">
-        <div className="panel-title">
-          <FileKey2 size={17} />
-          {t("profile.authSection")}
-        </div>
-        <label>
-          {t("profile.auth")}
-          <select
-            value={draft.authType}
-            onChange={(event) => {
-              const authType = event.currentTarget
-                .value as ConnectionProfile["authType"];
-              onChange({
-                ...draft,
-                authType,
-                privateKeyPath:
-                  authType === "privateKey" ? draft.privateKeyPath : "",
-              });
-              if (authType === "agent") {
-                setSecretDraft("");
-              }
-            }}
-          >
-            <option value="agent">{t("profile.authAgent")}</option>
-            <option value="privateKey">{t("profile.authPrivateKey")}</option>
-            <option value="password">{t("profile.authPassword")}</option>
-          </select>
-          <small>{t("profile.authHelp")}</small>
-        </label>
-        {showPrivateKey && (
-          <label>
-            {t("profile.privateKeyPath")}
-            <input
-              value={draft.privateKeyPath ?? ""}
-              onChange={(event) =>
-                onChange({ ...draft, privateKeyPath: event.currentTarget.value })
-              }
-              placeholder={t("profile.privateKeyPlaceholder")}
-            />
-          </label>
-        )}
-        {showSecret && (
-          <label>
-            {secretLabel}
-            <input
-              type="password"
-              value={secretDraft}
-              placeholder={t("profile.secretPlaceholder")}
-              onChange={(event) => setSecretDraft(event.currentTarget.value)}
-            />
-            <small>{t("profile.secretSavedHint")}</small>
-          </label>
-        )}
-      </section>
-
-      <section className="form-section">
-        <div className="panel-title">
-          <FolderTree size={17} />
-          {t("profile.organizeSection")}
-        </div>
-        <div className="form-grid">
-          <label>
-            {t("profile.group")}
-            <input
-              value={draft.groupId ?? ""}
-              onChange={(event) =>
-                onChange({ ...draft, groupId: event.currentTarget.value })
-              }
-              placeholder={t("profile.groupPlaceholder")}
-            />
-          </label>
-          <label>
-            {t("profile.tags")}
-            <input
-              value={tagsToText(draft.tags)}
-              onChange={(event) =>
-                onChange({ ...draft, tags: textToTags(event.currentTarget.value) })
-              }
-              placeholder={t("profile.tagsPlaceholder")}
-            />
-          </label>
-        </div>
-        <label>
-          {t("profile.jumpHost")}
-          <select
-            value={draft.jumpHostId ?? ""}
-            onChange={(event) =>
-              onChange({ ...draft, jumpHostId: event.currentTarget.value })
-            }
-          >
-            <option value="">{t("profile.noJumpHost")}</option>
-            {jumpHostOptions.map((profile) => (
-              <option key={profile.id} value={profile.id}>
-                {profile.name} · {profile.username}@{profile.host}:{profile.port}
-              </option>
-            ))}
-          </select>
-          <small>{t("profile.jumpHostHelp")}</small>
-        </label>
-        <label className="check-row">
-          <input
-            type="checkbox"
-            checked={draft.favorite}
-            onChange={(event) =>
-              onChange({ ...draft, favorite: event.currentTarget.checked })
-            }
-          />
-          <span>{t("profile.favorite")}</span>
-          <small>{t("profile.favoriteHelp")}</small>
-        </label>
-      </section>
-
-      <div className="form-actions">
-        <button className="secondary-button" type="button" onClick={onCancel}>
-          {t("profile.cancel")}
-        </button>
-        <button
-          className="secondary-button"
-          type="button"
-          disabled={isTesting}
-          onClick={onTest}
-        >
-          {isTesting ? (
-            <Loader2 className="spin" size={16} />
-          ) : (
-            <ShieldCheck size={16} />
-          )}
-          {t("profile.test")}
-        </button>
-        <button className="primary-button" type="submit">
-          <Save size={16} />
-          {t("profile.save")}
-        </button>
-      </div>
-    </form>
-  );
-}
-
-function QuickCommandPanel({
-  templates,
-  disabled,
-  draft,
-  onDraftChange,
-  onAdd,
-  onDelete,
-  onQueue,
-  onFill,
-  t,
-}: {
-  templates: QuickCommandTemplate[];
-  disabled: boolean;
-  draft: { title: string; command: string; explanation: string };
-  onDraftChange: (draft: {
-    title: string;
-    command: string;
-    explanation: string;
-  }) => void;
-  onAdd: (event: FormEvent) => void;
-  onDelete: (commandId: string) => void;
-  onQueue: (template: QuickCommandTemplate) => Promise<void>;
-  onFill: (command: string) => Promise<void>;
-  t: (key: string, values?: Record<string, string | number>) => string;
-}) {
-  return (
-    <div className="quick-command-panel">
-      <div className="panel-title">
-        <TerminalSquare size={16} />
-        {t("quick.title")}
-      </div>
-      <form className="quick-command-form" onSubmit={onAdd}>
-        <input
-          value={draft.title}
-          onChange={(event) =>
-            onDraftChange({ ...draft, title: event.currentTarget.value })
-          }
-          placeholder={t("quick.namePlaceholder")}
-        />
-        <input
-          value={draft.command}
-          onChange={(event) =>
-            onDraftChange({ ...draft, command: event.currentTarget.value })
-          }
-          placeholder={t("quick.commandPlaceholder")}
-        />
-        <input
-          value={draft.explanation}
-          onChange={(event) =>
-            onDraftChange({ ...draft, explanation: event.currentTarget.value })
-          }
-          placeholder={t("quick.notePlaceholder")}
-        />
-        <button className="mini-button" type="submit">
-          <Plus size={13} />
-          {t("quick.add")}
-        </button>
-      </form>
-      <div className="quick-command-grid">
-        {templates.map((template) => (
-          <div className="quick-command" key={template.id}>
-            <div>
-              <strong>
-                {template.titleKey ? t(template.titleKey) : template.title}
-              </strong>
-              <span>
-                {template.explanationKey
-                  ? t(template.explanationKey)
-                  : template.explanation || t("quick.customCommand")}
-              </span>
-            </div>
-            <code>{template.command}</code>
-            <div className="quick-command-actions">
-              <button
-                className="mini-button"
-                disabled={disabled}
-                onClick={() => void onFill(template.command)}
-              >
-                <Send size={13} />
-                {t("ai.fill")}
-              </button>
-              <button
-                className="mini-button"
-                disabled={disabled}
-                onClick={() => void onQueue(template)}
-              >
-                <Check size={13} />
-                {t("ai.queue")}
-              </button>
-              <button
-                className="icon-button compact"
-                title={t("ai.copyCommand")}
-                onClick={() => void navigator.clipboard.writeText(template.command)}
-              >
-                <Copy size={13} />
-              </button>
-              {!template.builtin && (
-                <button
-                  className="icon-button compact danger"
-                  title={t("quick.delete")}
-                  onClick={() => onDelete(template.id)}
-                >
-                  <Trash2 size={13} />
-                </button>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function SuggestionCard({
-  suggestion,
-  onQueue,
-  onFill,
-  t,
-  riskLabel,
-}: {
-  suggestion: AiCommandSuggestion;
-  onQueue: () => void;
-  onFill: () => void;
-  t: (key: string, values?: Record<string, string | number>) => string;
-  riskLabel: Record<RiskLevel, string>;
-}) {
-  return (
-    <div className="suggestion-card">
-      <div className="suggestion-head">
-        <span className={`risk ${suggestion.riskLevel}`}>
-          {riskLabel[suggestion.riskLevel]}
-        </span>
-        <div className="suggestion-flags">
-          {suggestion.requiresSudo && <span>{t("ai.flagSudo")}</span>}
-          {suggestion.modifiesFiles && <span>{t("ai.flagModifies")}</span>}
-          {suggestion.destructive && <span>{t("ai.flagDestructive")}</span>}
-        </div>
-      </div>
-      <code>{suggestion.command}</code>
-      <p>{suggestion.explanation}</p>
-      <small>{suggestion.expectedOutcome}</small>
-      <div className="suggestion-actions">
-        <button className="mini-button" onClick={onQueue}>
-          <Check size={13} />
-          {t("ai.queue")}
-        </button>
-        <button className="mini-button" onClick={onFill}>
-          <Send size={13} />
-          {t("ai.fill")}
-        </button>
-        <button
-          className="icon-button"
-          title={t("ai.copyCommand")}
-          onClick={() => void navigator.clipboard.writeText(suggestion.command)}
-        >
-          <Copy size={13} />
-        </button>
-      </div>
     </div>
   );
 }
