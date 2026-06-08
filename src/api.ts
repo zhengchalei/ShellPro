@@ -7,6 +7,10 @@ import type {
   CommandQueueItem,
   ConnectionProfile,
   ConnectionProfileInput,
+  ConnectionTestResult,
+  ImportProfilesResult,
+  SshTunnelInput,
+  SshTunnelSession,
   RedactionPreview,
   TerminalSession,
   WorkspaceFileEntry,
@@ -122,6 +126,164 @@ function mockProfiles(): ConnectionProfile[] {
 
 function saveMockProfiles(profiles: ConnectionProfile[]) {
   localStorage.setItem("shellpro.preview.profiles", JSON.stringify(profiles));
+}
+
+function mockTunnels(): SshTunnelSession[] {
+  try {
+    return JSON.parse(localStorage.getItem("shellpro.preview.tunnels") ?? "[]");
+  } catch {
+    return [];
+  }
+}
+
+function saveMockTunnels(tunnels: SshTunnelSession[]) {
+  localStorage.setItem("shellpro.preview.tunnels", JSON.stringify(tunnels));
+}
+
+function hasOpenSshWildcard(value: string) {
+  return /[*?!]/.test(value);
+}
+
+function parseProxyJumpHost(value: string) {
+  const first = value.split(",")[0]?.trim();
+  if (!first || first.toLowerCase() === "none") {
+    return "";
+  }
+  const withoutUser = first.includes("@") ? first.split("@").pop() ?? first : first;
+  return withoutUser.split(":")[0]?.trim() ?? "";
+}
+
+function importOpenSshProfilesForPreview(content: string): ImportProfilesResult {
+  const existingProfiles = mockProfiles();
+  const imported: Array<ConnectionProfile & { proxyJumpHost?: string }> = [];
+  const warnings: string[] = [];
+  let skipped = 0;
+  let inMatchBlock = false;
+  let current:
+    | {
+        aliases: string[];
+        values: Record<string, string>;
+      }
+    | null = null;
+
+  const flush = () => {
+    if (!current) {
+      return;
+    }
+    const alias = current.aliases.find((item) => !hasOpenSshWildcard(item));
+    if (!alias) {
+      skipped += current.aliases.length;
+      current = null;
+      return;
+    }
+    const hostName = current.values.hostname || alias;
+    const user = current.values.user || "root";
+    const port = Number(current.values.port || 22);
+    if (!hostName || !Number.isFinite(port) || port < 1 || port > 65535) {
+      skipped += 1;
+      warnings.push(`Skipped ${alias}: invalid host or port.`);
+      current = null;
+      return;
+    }
+    const proxyJumpHost = parseProxyJumpHost(current.values.proxyjump || "");
+    const jumpHostId =
+      existingProfiles.find(
+        (profile) => profile.host === proxyJumpHost || profile.name === proxyJumpHost,
+      )?.id ?? "";
+    const nowValue = now();
+    const existingProfile = existingProfiles.find((profile) => profile.name === alias);
+    imported.push({
+      id: existingProfile?.id ?? crypto.randomUUID(),
+      name: alias,
+      host: hostName,
+      port,
+      username: user,
+      authType: current.values.identityfile ? "privateKey" : "agent",
+      privateKeyPath: current.values.identityfile || "",
+      groupId: "Imported",
+      tags: ["openssh"],
+      jumpHostId,
+      favorite: false,
+      createdAt: existingProfile?.createdAt ?? nowValue,
+      updatedAt: nowValue,
+      proxyJumpHost,
+    });
+    current = null;
+  };
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const [keyword = "", ...rest] = trimmed.split(/\s+/);
+    const key = keyword.toLowerCase();
+    const value = rest.join(" ").trim();
+    if (key === "host") {
+      inMatchBlock = false;
+      flush();
+      const aliases = rest.filter(Boolean);
+      if (
+        aliases.length === 0 ||
+        aliases.some((alias) => alias.toLowerCase() === "*" || hasOpenSshWildcard(alias))
+      ) {
+        skipped += aliases.length || 1;
+        current = null;
+        continue;
+      }
+      current = { aliases, values: {} };
+      continue;
+    }
+    if (key === "match") {
+      flush();
+      inMatchBlock = true;
+      warnings.push("Skipped Match block; complex OpenSSH conditions are not imported.");
+      continue;
+    }
+    if (key === "include") {
+      warnings.push("Skipped Include directive; import one resolved config file at a time.");
+      continue;
+    }
+    if (inMatchBlock) {
+      continue;
+    }
+    if (!current) {
+      continue;
+    }
+    if (["hostname", "user", "port", "identityfile", "proxyjump"].includes(key)) {
+      current.values[key] = value;
+    }
+  }
+  flush();
+
+  const profileIndex = new Map<string, string>();
+  [...existingProfiles, ...imported].forEach((profile) => {
+    profileIndex.set(profile.name, profile.id);
+    profileIndex.set(profile.host, profile.id);
+  });
+  const importedProfiles = imported.map(({ proxyJumpHost, ...profile }) => {
+    if (!profile.jumpHostId && proxyJumpHost) {
+      profile.jumpHostId = profileIndex.get(proxyJumpHost) ?? "";
+      if (!profile.jumpHostId) {
+        warnings.push(
+          `Imported ${profile.name} without ProxyJump because the jump host profile was not found.`,
+        );
+      }
+    }
+    return profile;
+  });
+
+  const importedIds = new Set(importedProfiles.map((profile) => profile.id));
+  saveMockProfiles([
+    ...importedProfiles,
+    ...existingProfiles.filter((profile) => !importedIds.has(profile.id)),
+  ]);
+  return {
+    imported: importedProfiles.length,
+    skipped,
+    profiles: importedProfiles,
+    warnings,
+  };
 }
 
 const mockFileStorageKey = "shellpro.preview.files";
@@ -320,6 +482,54 @@ async function mockInvoke<T>(
       );
       return undefined as T;
     }
+    case "test_connection": {
+      const input = args.input as ConnectionProfileInput;
+      return {
+        reachable: true,
+        latencyMs: 18,
+        message: `${input.host}:${input.port} is reachable in browser preview.`,
+      } as T;
+    }
+    case "import_openssh_config":
+      return importOpenSshProfilesForPreview(args.content as string) as T;
+    case "list_ssh_tunnels":
+      return mockTunnels() as T;
+    case "start_ssh_tunnel": {
+      const input = args.input as SshTunnelInput;
+      const profile = mockProfiles().find((item) => item.id === input.profileId);
+      if (!profile) {
+        throw new Error("Profile not found.");
+      }
+      if (profile.authType === "password") {
+        throw new Error(
+          "SSH tunnels currently support SSH agent or private key profiles only.",
+        );
+      }
+      if (!input.localPort || !input.remotePort) {
+        throw new Error("Tunnel ports must be between 1 and 65535.");
+      }
+      if (!["127.0.0.1", "localhost", "::1"].includes(input.localHost.trim())) {
+        throw new Error("Only loopback bind addresses are supported for tunnels.");
+      }
+      const tunnel: SshTunnelSession = {
+        id: crypto.randomUUID(),
+        profileId: profile.id,
+        profileName: profile.name,
+        localHost: input.localHost.trim(),
+        localPort: input.localPort,
+        remoteHost: input.remoteHost.trim(),
+        remotePort: input.remotePort,
+        status: "running",
+        createdAt: now(),
+      };
+      saveMockTunnels([tunnel, ...mockTunnels()]);
+      return tunnel as T;
+    }
+    case "stop_ssh_tunnel":
+      saveMockTunnels(
+        mockTunnels().filter((tunnel) => tunnel.id !== args.tunnelId),
+      );
+      return undefined as T;
     case "save_profile_secret":
       return "browser-preview-secret" as T;
     case "save_ai_config":
@@ -558,6 +768,20 @@ export const shellProApi = {
     call<ConnectionProfile>("save_profile", { input }),
 
   deleteProfile: (id: string) => call<void>("delete_profile", { id }),
+
+  testConnection: (input: ConnectionProfileInput) =>
+    call<ConnectionTestResult>("test_connection", { input }),
+
+  importOpenSshConfig: (content: string) =>
+    call<ImportProfilesResult>("import_openssh_config", { content }),
+
+  listSshTunnels: () => call<SshTunnelSession[]>("list_ssh_tunnels"),
+
+  startSshTunnel: (input: SshTunnelInput) =>
+    call<SshTunnelSession>("start_ssh_tunnel", { input }),
+
+  stopSshTunnel: (tunnelId: string) =>
+    call<void>("stop_ssh_tunnel", { tunnelId }),
 
   saveProfileSecret: (profileId: string, secretKind: string, secret: string) =>
     call<string>("save_profile_secret", { profileId, secretKind, secret }),

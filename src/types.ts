@@ -1,9 +1,18 @@
 export type AuthType = "password" | "privateKey" | "agent";
 export type SessionKind = "local" | "ssh";
 export type SessionStatus = "connecting" | "connected" | "disconnected" | "error";
+export type SshTunnelStatus = "starting" | "running" | "stopped";
 export type RiskLevel = "low" | "medium" | "high";
 export type ContextMode = "selected" | "recentLines" | "fullBuffer";
 export type WorkspaceFileKind = "file" | "directory";
+export type TerminalTheme = "system" | "dark" | "light";
+
+export type TerminalPreferences = {
+  fontFamily: string;
+  fontSize: number;
+  scrollback: number;
+  theme: TerminalTheme;
+};
 
 export type ConnectionProfile = {
   id: string;
@@ -26,6 +35,39 @@ export type ConnectionProfileInput = Omit<
   "id" | "createdAt" | "updatedAt"
 > & {
   id?: string;
+};
+
+export type ConnectionTestResult = {
+  reachable: boolean;
+  latencyMs?: number | null;
+  message: string;
+};
+
+export type ImportProfilesResult = {
+  imported: number;
+  skipped: number;
+  profiles: ConnectionProfile[];
+  warnings: string[];
+};
+
+export type SshTunnelInput = {
+  profileId: string;
+  localHost: string;
+  localPort: number;
+  remoteHost: string;
+  remotePort: number;
+};
+
+export type SshTunnelSession = {
+  id: string;
+  profileId: string;
+  profileName: string;
+  localHost: string;
+  localPort: number;
+  remoteHost: string;
+  remotePort: number;
+  status: SshTunnelStatus;
+  createdAt: string;
 };
 
 export type TerminalSession = {

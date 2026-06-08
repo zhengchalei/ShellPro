@@ -10,10 +10,12 @@ use std::{
     env,
     fs,
     io::{Read, Write},
+    net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
@@ -23,6 +25,7 @@ struct AppState {
     db_path: PathBuf,
     workspace_root: PathBuf,
     terminals: Arc<Mutex<HashMap<String, TerminalProcess>>>,
+    tunnels: Arc<Mutex<HashMap<String, TunnelProcess>>>,
 }
 
 type TerminalWriter = Arc<Mutex<Box<dyn Write + Send>>>;
@@ -31,6 +34,11 @@ struct TerminalProcess {
     writer: TerminalWriter,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     master: Box<dyn MasterPty + Send>,
+}
+
+struct TunnelProcess {
+    session: SshTunnelSession,
+    child: Child,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -104,6 +112,54 @@ struct TerminalSession {
     cwd: Option<String>,
     shell: Option<String>,
     created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionTestResult {
+    reachable: bool,
+    latency_ms: Option<u64>,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportProfilesResult {
+    imported: usize,
+    skipped: usize,
+    profiles: Vec<ConnectionProfile>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SshTunnelInput {
+    profile_id: String,
+    local_host: String,
+    local_port: u16,
+    remote_host: String,
+    remote_port: u16,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SshTunnelSession {
+    id: String,
+    profile_id: String,
+    profile_name: String,
+    local_host: String,
+    local_port: u16,
+    remote_host: String,
+    remote_port: u16,
+    status: TunnelStatus,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+enum TunnelStatus {
+    Running,
+    Stopped,
 }
 
 #[derive(Debug, Serialize)]
@@ -877,6 +933,305 @@ fn save_profile_record(
     Ok(profile)
 }
 
+fn test_tcp_connection(host: &str, port: u16) -> ConnectionTestResult {
+    let host = host.trim();
+    if host.is_empty() {
+        return ConnectionTestResult {
+            reachable: false,
+            latency_ms: None,
+            message: "Host is required.".to_string(),
+        };
+    }
+    if port == 0 {
+        return ConnectionTestResult {
+            reachable: false,
+            latency_ms: None,
+            message: "Port must be between 1 and 65535.".to_string(),
+        };
+    }
+
+    let address = format!("{host}:{port}");
+    let timeout = Duration::from_secs(3);
+    let socket_addresses = match address.to_socket_addrs() {
+        Ok(addresses) => addresses.collect::<Vec<_>>(),
+        Err(error) => {
+            return ConnectionTestResult {
+                reachable: false,
+                latency_ms: None,
+                message: format!("Could not resolve {address}: {error}"),
+            };
+        }
+    };
+
+    if socket_addresses.is_empty() {
+        return ConnectionTestResult {
+            reachable: false,
+            latency_ms: None,
+            message: format!("Could not resolve {address}."),
+        };
+    }
+
+    let started = Instant::now();
+    let mut last_error = None;
+    for socket_address in socket_addresses {
+        match TcpStream::connect_timeout(&socket_address, timeout) {
+            Ok(_) => {
+                return ConnectionTestResult {
+                    reachable: true,
+                    latency_ms: Some(
+                        started
+                            .elapsed()
+                            .as_millis()
+                            .try_into()
+                            .unwrap_or(u64::MAX),
+                    ),
+                    message: format!("{address} is reachable."),
+                };
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+            }
+        }
+    }
+
+    ConnectionTestResult {
+        reachable: false,
+        latency_ms: None,
+        message: format!(
+            "{address} is not reachable: {}",
+            last_error.unwrap_or_else(|| "connection timed out".to_string())
+        ),
+    }
+}
+
+#[derive(Default)]
+struct OpenSshHostBlock {
+    aliases: Vec<String>,
+    hostname: Option<String>,
+    user: Option<String>,
+    port: Option<u16>,
+    identity_file: Option<String>,
+    proxy_jump: Option<String>,
+}
+
+struct ParsedOpenSshProfile {
+    input: ConnectionProfileInput,
+    proxy_jump: Option<String>,
+}
+
+fn has_openssh_wildcard(value: &str) -> bool {
+    value.contains('*') || value.contains('?') || value.contains('!')
+}
+
+fn proxy_jump_host(value: &str) -> Option<String> {
+    let first = value.split(',').next()?.trim();
+    if first.is_empty() || first.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let without_user = first.rsplit('@').next().unwrap_or(first);
+    let host = without_user.split(':').next().unwrap_or(without_user).trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+fn openssh_words(value: &str) -> Vec<String> {
+    value
+        .split_whitespace()
+        .map(|word| word.trim_matches('"').trim_matches('\'').to_string())
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+fn profile_input_from_openssh_block(
+    block: OpenSshHostBlock,
+    existing_profiles: &[ConnectionProfile],
+    warnings: &mut Vec<String>,
+) -> Option<ParsedOpenSshProfile> {
+    let alias = block
+        .aliases
+        .iter()
+        .find(|alias| !has_openssh_wildcard(alias))
+        .cloned();
+    let Some(alias) = alias else {
+        return None;
+    };
+
+    let host = block.hostname.unwrap_or_else(|| alias.clone());
+    if host.trim().is_empty() {
+        warnings.push(format!("Skipped {alias}: host is empty."));
+        return None;
+    }
+
+    let proxy_jump = block.proxy_jump;
+    let jump_host_id = proxy_jump.as_ref().and_then(|value| {
+        proxy_jump_host(value).and_then(|jump_host| {
+            existing_profiles
+                .iter()
+                .find(|profile| profile.host == jump_host || profile.name == jump_host)
+                .map(|profile| profile.id.clone())
+        })
+    });
+
+    Some(ParsedOpenSshProfile {
+        input: ConnectionProfileInput {
+            id: None,
+            name: alias,
+            host,
+            port: block.port.unwrap_or(22),
+            username: block.user.unwrap_or_else(|| "root".to_string()),
+            auth_type: if block.identity_file.is_some() {
+                AuthType::PrivateKey
+            } else {
+                AuthType::Agent
+            },
+            private_key_path: block.identity_file,
+            group_id: Some("Imported".to_string()),
+            tags: vec!["openssh".to_string()],
+            jump_host_id,
+            favorite: false,
+        },
+        proxy_jump,
+    })
+}
+
+fn parse_openssh_config(
+    content: &str,
+    existing_profiles: &[ConnectionProfile],
+) -> (Vec<ConnectionProfileInput>, usize, Vec<String>) {
+    let mut parsed_profiles = Vec::new();
+    let mut warnings = Vec::new();
+    let mut skipped = 0;
+    let mut current: Option<OpenSshHostBlock> = None;
+    let mut in_match_block = false;
+
+    let flush_current = |current: &mut Option<OpenSshHostBlock>,
+                         parsed_profiles: &mut Vec<ParsedOpenSshProfile>,
+                         warnings: &mut Vec<String>,
+                         skipped: &mut usize| {
+        if let Some(block) = current.take() {
+            let alias_count = block.aliases.len().max(1);
+            if let Some(profile) =
+                profile_input_from_openssh_block(block, existing_profiles, warnings)
+            {
+                parsed_profiles.push(profile);
+            } else {
+                *skipped += alias_count;
+            }
+        }
+    };
+
+    for raw_line in content.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let line_without_comment = trimmed.split('#').next().unwrap_or("").trim();
+        if line_without_comment.is_empty() {
+            continue;
+        }
+        let mut parts = line_without_comment.splitn(2, char::is_whitespace);
+        let keyword = parts.next().unwrap_or("").to_ascii_lowercase();
+        let value = parts.next().unwrap_or("").trim();
+
+        match keyword.as_str() {
+            "host" => {
+                in_match_block = false;
+                flush_current(&mut current, &mut parsed_profiles, &mut warnings, &mut skipped);
+                let aliases = openssh_words(value);
+                if aliases.is_empty()
+                    || aliases
+                        .iter()
+                        .any(|alias| alias == "*" || has_openssh_wildcard(alias))
+                {
+                    skipped += aliases.len().max(1);
+                    current = None;
+                    continue;
+                }
+                current = Some(OpenSshHostBlock {
+                    aliases,
+                    ..OpenSshHostBlock::default()
+                });
+            }
+            "match" => {
+                flush_current(&mut current, &mut parsed_profiles, &mut warnings, &mut skipped);
+                in_match_block = true;
+                warnings.push("Skipped Match block; complex OpenSSH conditions are not imported.".to_string());
+            }
+            "include" => {
+                warnings.push("Skipped Include directive; import one resolved config file at a time.".to_string());
+            }
+            _ if in_match_block => {}
+            _ => {
+                if let Some(block) = &mut current {
+                    match keyword.as_str() {
+                        "hostname" => block.hostname = Some(value.to_string()),
+                        "user" => block.user = Some(value.to_string()),
+                        "port" => match value.parse::<u16>() {
+                            Ok(port) if port > 0 => block.port = Some(port),
+                            _ => warnings.push(format!(
+                                "Skipped invalid port '{value}' for {}.",
+                                block.aliases.join(", ")
+                            )),
+                        },
+                        "identityfile" => block.identity_file = Some(value.to_string()),
+                        "proxyjump" => block.proxy_jump = Some(value.to_string()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    flush_current(&mut current, &mut parsed_profiles, &mut warnings, &mut skipped);
+
+    let mut profile_index: HashMap<String, String> = existing_profiles
+        .iter()
+        .flat_map(|profile| {
+            [
+                (profile.name.clone(), profile.id.clone()),
+                (profile.host.clone(), profile.id.clone()),
+            ]
+        })
+        .collect();
+
+    for profile in &mut parsed_profiles {
+        if profile.input.id.is_none() {
+            profile.input.id = existing_profiles
+                .iter()
+                .find(|existing| existing.name == profile.input.name)
+                .map(|existing| existing.id.clone());
+        }
+        let id = profile.input.id.get_or_insert_with(|| Uuid::new_v4().to_string());
+        profile_index.insert(profile.input.name.clone(), id.clone());
+        profile_index.insert(profile.input.host.clone(), id.clone());
+    }
+
+    let imported = parsed_profiles
+        .into_iter()
+        .map(|mut profile| {
+            if profile.input.jump_host_id.is_none() {
+                if let Some(proxy_jump) = &profile.proxy_jump {
+                    if let Some(jump_host) = proxy_jump_host(proxy_jump) {
+                        profile.input.jump_host_id = profile_index.get(&jump_host).cloned();
+                        if profile.input.jump_host_id.is_none() {
+                            warnings.push(format!(
+                                "Imported {} without ProxyJump because the jump host profile was not found.",
+                                profile.input.name
+                            ));
+                        }
+                    }
+                }
+            }
+            profile.input
+        })
+        .collect();
+
+    (imported, skipped, warnings)
+}
+
 fn keyring_entry(secret_ref: &str) -> Result<KeyringEntry, String> {
     KeyringEntry::new("ShellPro", secret_ref)
         .map_err(|error| format!("Could not open secure storage entry: {error}"))
@@ -1134,6 +1489,133 @@ fn spawn_terminal(
         );
     spawn_reader(app, session_id, reader, writer, auto_secret);
     Ok(session)
+}
+
+fn ssh_destination(profile: &ConnectionProfile) -> String {
+    format!("{}@{}", profile.username, profile.host)
+}
+
+fn append_ssh_base_args(args: &mut Vec<String>, profile: &ConnectionProfile, batch_mode: bool) {
+    args.push("-p".to_string());
+    args.push(profile.port.to_string());
+    args.push("-o".to_string());
+    args.push("ServerAliveInterval=30".to_string());
+    args.push("-o".to_string());
+    args.push("ServerAliveCountMax=3".to_string());
+    args.push("-o".to_string());
+    args.push(format!(
+        "BatchMode={}",
+        if batch_mode { "yes" } else { "no" }
+    ));
+}
+
+fn append_ssh_auth_args(args: &mut Vec<String>, profile: &ConnectionProfile) {
+    match &profile.auth_type {
+        AuthType::Password => {
+            args.push("-o".to_string());
+            args.push("PreferredAuthentications=password,keyboard-interactive".to_string());
+            args.push("-o".to_string());
+            args.push("PubkeyAuthentication=no".to_string());
+        }
+        AuthType::PrivateKey => {
+            args.push("-o".to_string());
+            args.push("IdentitiesOnly=yes".to_string());
+            if let Some(key_path) = &profile.private_key_path {
+                args.push("-i".to_string());
+                args.push(key_path.to_string());
+            }
+        }
+        AuthType::Agent => {}
+    }
+}
+
+fn append_ssh_jump_arg(
+    args: &mut Vec<String>,
+    conn: &Connection,
+    profile: &ConnectionProfile,
+    require_existing_jump_host: bool,
+) -> Result<(), String> {
+    if let Some(jump_host_id) = &profile.jump_host_id {
+        match find_profile(conn, jump_host_id) {
+            Ok(jump_profile) => {
+                args.push("-J".to_string());
+                args.push(format!(
+                    "{}@{}:{}",
+                    jump_profile.username, jump_profile.host, jump_profile.port
+                ));
+            }
+            Err(error) if require_existing_jump_host => return Err(error),
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn ssh_session_args(conn: &Connection, profile: &ConnectionProfile) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    append_ssh_base_args(&mut args, profile, false);
+    append_ssh_auth_args(&mut args, profile);
+    append_ssh_jump_arg(&mut args, conn, profile, false)?;
+    args.push(ssh_destination(profile));
+    Ok(args)
+}
+
+fn validate_tunnel_input(input: &SshTunnelInput) -> Result<(), String> {
+    let local_host = input.local_host.trim();
+    let remote_host = input.remote_host.trim();
+    if local_host.is_empty() {
+        return Err("Local bind address is required.".to_string());
+    }
+    if !matches!(local_host, "127.0.0.1" | "localhost" | "::1") {
+        return Err("Only loopback bind addresses are supported for tunnels.".to_string());
+    }
+    if input.local_port == 0 || input.remote_port == 0 {
+        return Err("Tunnel ports must be between 1 and 65535.".to_string());
+    }
+    if remote_host.is_empty() {
+        return Err("Remote host is required.".to_string());
+    }
+    Ok(())
+}
+
+fn ssh_tunnel_args(
+    conn: &Connection,
+    profile: &ConnectionProfile,
+    input: &SshTunnelInput,
+) -> Result<Vec<String>, String> {
+    validate_tunnel_input(input)?;
+    if matches!(profile.auth_type, AuthType::Password) {
+        return Err(
+            "SSH tunnels currently support SSH agent or private key profiles only.".to_string(),
+        );
+    }
+
+    let mut args = Vec::new();
+    append_ssh_base_args(&mut args, profile, true);
+    append_ssh_auth_args(&mut args, profile);
+    append_ssh_jump_arg(&mut args, conn, profile, true)?;
+    args.push("-o".to_string());
+    args.push("ExitOnForwardFailure=yes".to_string());
+    args.push("-N".to_string());
+    args.push("-T".to_string());
+    args.push("-L".to_string());
+    args.push(format!(
+        "{}:{}:{}:{}",
+        input.local_host.trim(),
+        input.local_port,
+        input.remote_host.trim(),
+        input.remote_port
+    ));
+    args.push(ssh_destination(profile));
+    Ok(args)
+}
+
+fn ssh_command_builder(args: &[String]) -> CommandBuilder {
+    let mut command = CommandBuilder::new("ssh");
+    for arg in args {
+        command.arg(arg);
+    }
+    command
 }
 
 fn classify_command(command: &str) -> (RiskLevel, bool, bool, bool, bool) {
@@ -1895,6 +2377,32 @@ fn delete_profile(state: State<AppState>, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn test_connection(input: ConnectionProfileInput) -> Result<ConnectionTestResult, String> {
+    Ok(test_tcp_connection(&input.host, input.port))
+}
+
+#[tauri::command]
+fn import_openssh_config(
+    state: State<AppState>,
+    content: String,
+) -> Result<ImportProfilesResult, String> {
+    let conn = open_db(&state.db_path)?;
+    let existing_profiles = load_profiles(&conn)?;
+    let (inputs, skipped, warnings) = parse_openssh_config(&content, &existing_profiles);
+    let mut profiles = Vec::new();
+    for input in inputs {
+        profiles.push(save_profile_record(&conn, input)?);
+    }
+
+    Ok(ImportProfilesResult {
+        imported: profiles.len(),
+        skipped,
+        profiles,
+        warnings,
+    })
+}
+
+#[tauri::command]
 fn save_profile_secret(
     profile_id: String,
     secret_kind: String,
@@ -2042,46 +2550,8 @@ fn start_ssh_session(
     let profile = find_profile(&conn, &profile_id)?;
     let auto_secret = load_profile_secret(&profile)?;
     let session_id = Uuid::new_v4().to_string();
-    let destination = format!("{}@{}", profile.username, profile.host);
-    let mut command = CommandBuilder::new("ssh");
-    command.arg("-p");
-    command.arg(profile.port.to_string());
-    command.arg("-o");
-    command.arg("ServerAliveInterval=30");
-    command.arg("-o");
-    command.arg("ServerAliveCountMax=3");
-    command.arg("-o");
-    command.arg("BatchMode=no");
-
-    match &profile.auth_type {
-        AuthType::Password => {
-            command.arg("-o");
-            command.arg("PreferredAuthentications=password,keyboard-interactive");
-            command.arg("-o");
-            command.arg("PubkeyAuthentication=no");
-        }
-        AuthType::PrivateKey => {
-            command.arg("-o");
-            command.arg("IdentitiesOnly=yes");
-            if let Some(key_path) = &profile.private_key_path {
-                command.arg("-i");
-                command.arg(key_path);
-            }
-        }
-        AuthType::Agent => {}
-    }
-
-    if let Some(jump_host_id) = &profile.jump_host_id {
-        if let Ok(jump_profile) = find_profile(&conn, jump_host_id) {
-            command.arg("-J");
-            command.arg(format!(
-                "{}@{}:{}",
-                jump_profile.username, jump_profile.host, jump_profile.port
-            ));
-        }
-    }
-
-    command.arg(destination);
+    let args = ssh_session_args(&conn, &profile)?;
+    let command = ssh_command_builder(&args);
     spawn_terminal(
         app,
         state,
@@ -2094,6 +2564,103 @@ fn start_ssh_session(
         SessionKind::Ssh,
         auto_secret,
     )
+}
+
+#[tauri::command]
+fn list_ssh_tunnels(state: State<AppState>) -> Result<Vec<SshTunnelSession>, String> {
+    let mut tunnels = state
+        .tunnels
+        .lock()
+        .map_err(|_| "Could not lock SSH tunnel registry.".to_string())?;
+    let mut sessions = Vec::new();
+    for tunnel in tunnels.values_mut() {
+        if tunnel.session.status == TunnelStatus::Running && tunnel.child.try_wait().ok().flatten().is_some() {
+            tunnel.session.status = TunnelStatus::Stopped;
+        }
+        sessions.push(tunnel.session.clone());
+    }
+    Ok(sessions)
+}
+
+#[tauri::command]
+fn start_ssh_tunnel(
+    state: State<AppState>,
+    input: SshTunnelInput,
+) -> Result<SshTunnelSession, String> {
+    let conn = open_db(&state.db_path)?;
+    let profile = find_profile(&conn, &input.profile_id)?;
+    let args = ssh_tunnel_args(&conn, &profile, &input)?;
+    let mut command = Command::new("ssh");
+    command
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not start SSH tunnel: {error}"))?;
+
+    thread::sleep(Duration::from_millis(500));
+    if let Some(status) = child
+        .try_wait()
+        .map_err(|error| format!("Could not inspect SSH tunnel status: {error}"))?
+    {
+        let mut stderr = String::new();
+        if let Some(mut stream) = child.stderr.take() {
+            let _ = stream.read_to_string(&mut stderr);
+        }
+        let detail = stderr.trim();
+        let message = if detail.is_empty() {
+            format!("SSH tunnel exited immediately with status {status}.")
+        } else {
+            format!("SSH tunnel exited immediately with status {status}: {detail}")
+        };
+        return Err(message);
+    }
+
+    if let Some(mut stream) = child.stderr.take() {
+        thread::spawn(move || {
+            let mut sink = Vec::new();
+            let _ = stream.read_to_end(&mut sink);
+        });
+    }
+
+    let session = SshTunnelSession {
+        id: Uuid::new_v4().to_string(),
+        profile_id: profile.id,
+        profile_name: profile.name,
+        local_host: input.local_host.trim().to_string(),
+        local_port: input.local_port,
+        remote_host: input.remote_host.trim().to_string(),
+        remote_port: input.remote_port,
+        status: TunnelStatus::Running,
+        created_at: now(),
+    };
+    state
+        .tunnels
+        .lock()
+        .map_err(|_| "Could not lock SSH tunnel registry.".to_string())?
+        .insert(
+            session.id.clone(),
+            TunnelProcess {
+                session: session.clone(),
+                child,
+            },
+        );
+    Ok(session)
+}
+
+#[tauri::command]
+fn stop_ssh_tunnel(state: State<AppState>, tunnel_id: String) -> Result<(), String> {
+    let mut tunnels = state
+        .tunnels
+        .lock()
+        .map_err(|_| "Could not lock SSH tunnel registry.".to_string())?;
+    if let Some(mut tunnel) = tunnels.remove(&tunnel_id) {
+        let _ = tunnel.child.kill();
+        let _ = tunnel.child.wait();
+    }
+    Ok(())
 }
 
 fn resize_session_inner(
@@ -2310,6 +2877,222 @@ mod tests {
     }
 
     #[test]
+    fn test_tcp_connection_rejects_blank_host() {
+        let result = test_tcp_connection("   ", 22);
+        assert!(!result.reachable);
+        assert_eq!(result.message, "Host is required.");
+    }
+
+    #[test]
+    fn test_tcp_connection_rejects_zero_port() {
+        let result = test_tcp_connection("localhost", 0);
+        assert!(!result.reachable);
+        assert_eq!(result.message, "Port must be between 1 and 65535.");
+    }
+
+    fn test_profile(id: &str, name: &str, host: &str) -> ConnectionProfile {
+        ConnectionProfile {
+            id: id.to_string(),
+            name: name.to_string(),
+            host: host.to_string(),
+            port: 22,
+            username: "ops".to_string(),
+            auth_type: AuthType::Agent,
+            private_key_path: None,
+            group_id: None,
+            tags: vec![],
+            jump_host_id: None,
+            favorite: false,
+            created_at: now(),
+            updated_at: now(),
+        }
+    }
+
+    fn tunnel_input(profile_id: &str) -> SshTunnelInput {
+        SshTunnelInput {
+            profile_id: profile_id.to_string(),
+            local_host: "127.0.0.1".to_string(),
+            local_port: 15432,
+            remote_host: "127.0.0.1".to_string(),
+            remote_port: 5432,
+        }
+    }
+
+    fn test_db() -> (Connection, PathBuf) {
+        let path = std::env::temp_dir().join(format!("shellpro-test-{}.sqlite3", Uuid::new_v4()));
+        let conn = open_db(&path).unwrap();
+        (conn, path)
+    }
+
+    #[test]
+    fn validates_tunnel_loopback_and_ports() {
+        let mut input = tunnel_input("profile-id");
+        input.local_port = 0;
+        assert_eq!(
+            validate_tunnel_input(&input).unwrap_err(),
+            "Tunnel ports must be between 1 and 65535."
+        );
+
+        input.local_port = 15432;
+        input.local_host = "0.0.0.0".to_string();
+        assert_eq!(
+            validate_tunnel_input(&input).unwrap_err(),
+            "Only loopback bind addresses are supported for tunnels."
+        );
+
+        input.local_host = "localhost".to_string();
+        assert!(validate_tunnel_input(&input).is_ok());
+    }
+
+    #[test]
+    fn builds_agent_tunnel_args_with_jump_host() {
+        let (conn, path) = test_db();
+        let mut jump = test_profile("jump-id", "jump", "jump.example.com");
+        jump.username = "bastion".to_string();
+        save_profile_record(
+            &conn,
+            ConnectionProfileInput {
+                id: Some(jump.id.clone()),
+                name: jump.name.clone(),
+                host: jump.host.clone(),
+                port: jump.port,
+                username: jump.username.clone(),
+                auth_type: jump.auth_type.clone(),
+                private_key_path: jump.private_key_path.clone(),
+                group_id: jump.group_id.clone(),
+                tags: jump.tags.clone(),
+                jump_host_id: None,
+                favorite: jump.favorite,
+            },
+        )
+        .unwrap();
+
+        let mut profile = test_profile("app-id", "app", "app.example.com");
+        profile.jump_host_id = Some("jump-id".to_string());
+        let args = ssh_tunnel_args(&conn, &profile, &tunnel_input("app-id")).unwrap();
+
+        assert!(args.contains(&"BatchMode=yes".to_string()));
+        assert!(args.contains(&"ExitOnForwardFailure=yes".to_string()));
+        assert!(args.contains(&"-N".to_string()));
+        assert!(args.contains(&"-T".to_string()));
+        assert!(args.contains(&"127.0.0.1:15432:127.0.0.1:5432".to_string()));
+        assert!(args.contains(&"bastion@jump.example.com:22".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("ops@app.example.com"));
+        drop(conn);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_password_profile_for_tunnels() {
+        let (conn, path) = test_db();
+        let mut profile = test_profile("password-id", "password", "app.example.com");
+        profile.auth_type = AuthType::Password;
+        let error = ssh_tunnel_args(&conn, &profile, &tunnel_input("password-id")).unwrap_err();
+        assert_eq!(
+            error,
+            "SSH tunnels currently support SSH agent or private key profiles only."
+        );
+        drop(conn);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn parses_common_openssh_config_profiles() {
+        let existing = vec![test_profile("jump-id", "bastion", "bastion.example.com")];
+        let (profiles, skipped, warnings) = parse_openssh_config(
+            r#"
+            Host app-server
+              HostName 10.0.0.15
+              User ubuntu
+              Port 2222
+              IdentityFile ~/.ssh/id_ed25519
+              ProxyJump ops@bastion.example.com:22
+
+            Host *
+              User ignored
+            "#,
+            &existing,
+        );
+
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(skipped, 1);
+        assert!(warnings.is_empty());
+        let profile = &profiles[0];
+        assert_eq!(profile.name, "app-server");
+        assert_eq!(profile.host, "10.0.0.15");
+        assert_eq!(profile.username, "ubuntu");
+        assert_eq!(profile.port, 2222);
+        assert!(matches!(profile.auth_type, AuthType::PrivateKey));
+        assert_eq!(profile.private_key_path.as_deref(), Some("~/.ssh/id_ed25519"));
+        assert_eq!(profile.jump_host_id.as_deref(), Some("jump-id"));
+    }
+
+    #[test]
+    fn imports_proxyjump_from_same_config_and_reuses_existing_id() {
+        let existing = vec![test_profile("existing-app-id", "app-server", "old.example.com")];
+        let (profiles, skipped, warnings) = parse_openssh_config(
+            r#"
+            Host bastion
+              HostName bastion.example.com
+              User ops
+
+            Host app-server
+              HostName 10.0.0.15
+              User ubuntu
+              ProxyJump bastion
+            "#,
+            &existing,
+        );
+
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(skipped, 0);
+        assert!(warnings.is_empty());
+        let bastion = profiles
+            .iter()
+            .find(|profile| profile.name == "bastion")
+            .expect("bastion profile");
+        let app = profiles
+            .iter()
+            .find(|profile| profile.name == "app-server")
+            .expect("app profile");
+        assert_eq!(app.id.as_deref(), Some("existing-app-id"));
+        assert_eq!(app.host, "10.0.0.15");
+        assert_eq!(app.jump_host_id.as_deref(), bastion.id.as_deref());
+    }
+
+    #[test]
+    fn skips_complex_openssh_blocks_with_warnings() {
+        let (profiles, skipped, warnings) = parse_openssh_config(
+            r#"
+            Include ~/.ssh/config.d/*
+            Host web-*
+              HostName 10.0.0.20
+            Match user root
+              HostName ignored
+            Host db
+              HostName db.internal
+              ProxyJump missing-bastion
+            "#,
+            &[],
+        );
+
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "db");
+        assert_eq!(profiles[0].host, "db.internal");
+        assert!(profiles[0].jump_host_id.is_none());
+        assert_eq!(skipped, 1);
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("Include directive")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("Match block")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("without ProxyJump")));
+    }
+
+    #[test]
     fn detects_ssh_credential_prompts() {
         assert!(looks_like_credential_prompt("root@example.com's password:"));
         assert!(looks_like_credential_prompt(
@@ -2352,11 +3135,12 @@ pub fn run() {
             let conn = open_db(&db_path)?;
             let _ = load_ai_config(&conn)?;
             let workspace_root = workspace_root()?;
-            app.manage(AppState {
-                db_path,
-                workspace_root,
-                terminals: Arc::new(Mutex::new(HashMap::new())),
-            });
+        app.manage(AppState {
+            db_path,
+            workspace_root,
+            terminals: Arc::new(Mutex::new(HashMap::new())),
+            tunnels: Arc::new(Mutex::new(HashMap::new())),
+        });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2371,6 +3155,8 @@ pub fn run() {
             list_profiles,
             save_profile,
             delete_profile,
+            test_connection,
+            import_openssh_config,
             save_profile_secret,
             save_ai_config,
             preview_ai_context,
@@ -2379,6 +3165,9 @@ pub fn run() {
             create_command_queue_item,
             start_local_session,
             start_ssh_session,
+            list_ssh_tunnels,
+            start_ssh_tunnel,
+            stop_ssh_tunnel,
             resize_session,
             write_to_session,
             execute_queued_command,
