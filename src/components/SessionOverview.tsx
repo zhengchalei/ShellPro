@@ -1,4 +1,6 @@
+import { Button, Label, ListBox, Select } from "@heroui/react";
 import { Server, ShieldCheck, TerminalSquare } from "lucide-react";
+import type { Key } from "react";
 import type { TerminalLayout } from "../appTypes";
 import type { TerminalSession } from "../types";
 
@@ -24,6 +26,12 @@ export function SessionOverview({
   const activeSession =
     sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
   const sshCount = sessions.filter((session) => session.kind === "ssh").length;
+
+  function selectSession(key: Key | null) {
+    if (key) {
+      onSelect(String(key));
+    }
+  }
 
   return (
     <div className="session-overview">
@@ -57,28 +65,39 @@ export function SessionOverview({
       </div>
 
       <div className="session-pickers">
-        <select
-          value={activeSession.id}
-          onChange={(event) => onSelect(event.currentTarget.value)}
-          title={t("workspace.activeSession")}
+        <Select
+          className="session-select"
+          selectedKey={activeSession.id}
+          onSelectionChange={selectSession}
+          aria-label={t("workspace.activeSession")}
         >
-          {sessions.map((session) => (
-            <option key={session.id} value={session.id}>
-              {session.title}
-            </option>
-          ))}
-        </select>
+          <Label>{t("workspace.activeSession")}</Label>
+          <Select.Trigger>
+            <Select.Value />
+            <Select.Indicator />
+          </Select.Trigger>
+          <Select.Popover>
+            <ListBox>
+              {sessions.map((session) => (
+                <ListBox.Item key={session.id} id={session.id}>
+                  {session.title}
+                </ListBox.Item>
+              ))}
+            </ListBox>
+          </Select.Popover>
+        </Select>
         <div className="layout-switch" aria-label={t("workspace.layout")}>
           {(["single", "split", "grid"] as TerminalLayout[]).map((layout) => (
-            <button
+            <Button
               key={layout}
-              className={terminalLayout === layout ? "active" : ""}
+              size="sm"
               type="button"
-              title={t(`layout.${layout}`)}
-              onClick={() => onLayoutChange(layout)}
+              variant={terminalLayout === layout ? "primary" : "ghost"}
+              aria-label={t(`layout.${layout}`)}
+              onPress={() => onLayoutChange(layout)}
             >
               {layout === "single" ? "1" : layout === "split" ? "2" : "4"}
-            </button>
+            </Button>
           ))}
         </div>
         <span className="visible-pane-count">

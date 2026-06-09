@@ -287,6 +287,7 @@ function importOpenSshProfilesForPreview(content: string): ImportProfilesResult 
 }
 
 const mockFileStorageKey = "shellpro.preview.files";
+const mockFileContentStorageKey = "shellpro.preview.fileContents";
 
 function defaultMockFiles(): WorkspaceFileEntry[] {
   return [
@@ -365,6 +366,20 @@ function mockFiles(): WorkspaceFileEntry[] {
 
 function saveMockFiles(files: WorkspaceFileEntry[]) {
   localStorage.setItem(mockFileStorageKey, JSON.stringify(files));
+}
+
+function mockFileContents(): Record<string, string> {
+  try {
+    return JSON.parse(
+      localStorage.getItem(mockFileContentStorageKey) ?? "{}",
+    ) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function saveMockFileContents(contents: Record<string, string>) {
+  localStorage.setItem(mockFileContentStorageKey, JSON.stringify(contents));
 }
 
 function dirname(path: string) {
@@ -567,9 +582,26 @@ async function mockInvoke<T>(
         content:
           entry.kind === "directory"
             ? null
-            : `Preview content for ${entry.relativePath}\n\nThis browser preview mirrors desktop file actions.`,
+            : mockFileContents()[entry.path] ??
+              `Preview content for ${entry.relativePath}\n\nThis browser preview mirrors desktop file actions.`,
         truncated: false,
       } as T;
+    }
+    case "save_workspace_file": {
+      const files = mockFiles();
+      const path = String(args.path ?? "");
+      const content = String(args.content ?? "");
+      const entry = walkMockFiles(files, (item) => item.path === path);
+      if (!entry || entry.kind !== "file") {
+        throw new Error("File not found.");
+      }
+      const contents = mockFileContents();
+      contents[path] = content;
+      entry.size = new TextEncoder().encode(content).length;
+      entry.modifiedAt = now();
+      saveMockFileContents(contents);
+      saveMockFiles(files);
+      return undefined as T;
     }
     case "create_workspace_file": {
       const files = mockFiles();
@@ -673,6 +705,13 @@ async function mockInvoke<T>(
           modifiedAt: now(),
         });
       }
+      try {
+        const contents = mockFileContents();
+        contents[path] = new TextDecoder().decode(new Uint8Array(bytes));
+        saveMockFileContents(contents);
+      } catch {
+        // Binary preview content remains unavailable.
+      }
       saveMockFiles(files);
       return undefined as T;
     }
@@ -736,10 +775,17 @@ export const shellProApi = {
 
   listProfiles: () => call<ConnectionProfile[]>("list_profiles"),
 
-  listWorkspaceFiles: () => call<WorkspaceFileTree>("list_workspace_files"),
+  listWorkspaceFiles: (sessionId?: string | null) =>
+    call<WorkspaceFileTree>("list_workspace_files", { sessionId }),
 
-  previewWorkspaceFile: (path: string) =>
-    call<WorkspaceFilePreview>("preview_workspace_file", { path }),
+  previewWorkspaceFile: (path: string, sessionId?: string | null) =>
+    call<WorkspaceFilePreview>("preview_workspace_file", { path, sessionId }),
+
+  saveWorkspaceFile: (
+    path: string,
+    content: string,
+    sessionId?: string | null,
+  ) => call<void>("save_workspace_file", { path, content, sessionId }),
 
   createWorkspaceFile: (
     parentPath: string | null,

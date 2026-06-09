@@ -1,4 +1,15 @@
 import {
+  Button,
+  Card,
+  Checkbox,
+  Description,
+  Input,
+  Label,
+  ListBox,
+  Select,
+  TextField,
+} from "@heroui/react";
+import {
   FileKey2,
   FolderTree,
   Loader2,
@@ -7,9 +18,11 @@ import {
   ShieldCheck,
   X,
 } from "lucide-react";
-import type { FormEvent } from "react";
+import type { FormEvent, Key } from "react";
 import { tagsToText, textToTags } from "../appState";
 import type { ConnectionProfile, ConnectionProfileInput } from "../types";
+
+const noJumpHostKey = "__none";
 
 export function ProfileEditor({
   draft,
@@ -43,6 +56,26 @@ export function ProfileEditor({
       ? t("profile.password")
       : t("profile.passphrase");
   const jumpHostOptions = profiles.filter((profile) => profile.id !== draft.id);
+  const authOptions: Array<{
+    id: ConnectionProfile["authType"];
+    label: string;
+  }> = [
+    { id: "agent", label: t("profile.authAgent") },
+    { id: "privateKey", label: t("profile.authPrivateKey") },
+    { id: "password", label: t("profile.authPassword") },
+  ];
+
+  function updateAuthType(key: Key | null) {
+    const authType = String(key || "agent") as ConnectionProfile["authType"];
+    onChange({
+      ...draft,
+      authType,
+      privateKeyPath: authType === "privateKey" ? draft.privateKeyPath : "",
+    });
+    if (authType === "agent") {
+      setSecretDraft("");
+    }
+  }
 
   return (
     <form className="profile-editor" onSubmit={onSubmit}>
@@ -53,188 +86,210 @@ export function ProfileEditor({
             {isEditing ? t("profile.editTitle") : t("profile.createTitle")}
           </h2>
         </div>
-        <button
-          className="icon-button"
+        <Button
+          className="profile-icon-button"
+          isIconOnly
+          size="sm"
           type="button"
-          title={t("profile.cancel")}
-          onClick={onCancel}
+          variant="ghost"
+          aria-label={t("profile.cancel")}
+          onPress={onCancel}
         >
           <X size={15} />
-        </button>
+        </Button>
       </div>
 
-      <section className="form-section">
-        <div className="panel-title">
+      <Card className="profile-section" variant="secondary">
+        <Card.Header className="profile-section-head">
           <Server size={17} />
-          {t("profile.basicSection")}
-        </div>
-        <label>
-          {t("profile.name")}
-          <input
-            value={draft.name}
-            onChange={(event) =>
-              onChange({ ...draft, name: event.currentTarget.value })
-            }
-            placeholder={t("profile.namePlaceholder")}
-          />
-        </label>
-        <div className="form-grid host-grid">
-          <label>
-            {t("profile.host")}
-            <input
-              value={draft.host}
+          <Card.Title>{t("profile.basicSection")}</Card.Title>
+        </Card.Header>
+        <Card.Content className="profile-section-content">
+          <TextField className="profile-field" fullWidth>
+            <Label>{t("profile.name")}</Label>
+            <Input
+              value={draft.name}
               onChange={(event) =>
-                onChange({ ...draft, host: event.currentTarget.value })
+                onChange({ ...draft, name: event.currentTarget.value })
               }
-              placeholder={t("profile.hostPlaceholder")}
+              placeholder={t("profile.namePlaceholder")}
             />
-          </label>
-          <label>
-            {t("profile.port")}
-            <input
-              type="number"
-              min={1}
-              max={65535}
-              value={draft.port}
+          </TextField>
+          <div className="form-grid host-grid">
+            <TextField className="profile-field" fullWidth>
+              <Label>{t("profile.host")}</Label>
+              <Input
+                value={draft.host}
+                onChange={(event) =>
+                  onChange({ ...draft, host: event.currentTarget.value })
+                }
+                placeholder={t("profile.hostPlaceholder")}
+              />
+            </TextField>
+            <TextField className="profile-field" fullWidth>
+              <Label>{t("profile.port")}</Label>
+              <Input
+                type="number"
+                min={1}
+                max={65535}
+                value={String(draft.port)}
+                onChange={(event) =>
+                  onChange({ ...draft, port: Number(event.currentTarget.value) })
+                }
+              />
+            </TextField>
+          </div>
+          <TextField className="profile-field" fullWidth>
+            <Label>{t("profile.username")}</Label>
+            <Input
+              value={draft.username}
               onChange={(event) =>
-                onChange({ ...draft, port: Number(event.currentTarget.value) })
+                onChange({ ...draft, username: event.currentTarget.value })
               }
+              placeholder={t("profile.usernamePlaceholder")}
             />
-          </label>
-        </div>
-        <label>
-          {t("profile.username")}
-          <input
-            value={draft.username}
-            onChange={(event) =>
-              onChange({ ...draft, username: event.currentTarget.value })
-            }
-            placeholder={t("profile.usernamePlaceholder")}
-          />
-        </label>
-      </section>
+          </TextField>
+        </Card.Content>
+      </Card>
 
-      <section className="form-section">
-        <div className="panel-title">
+      <Card className="profile-section" variant="secondary">
+        <Card.Header className="profile-section-head">
           <FileKey2 size={17} />
-          {t("profile.authSection")}
-        </div>
-        <label>
-          {t("profile.auth")}
-          <select
-            value={draft.authType}
-            onChange={(event) => {
-              const authType = event.currentTarget
-                .value as ConnectionProfile["authType"];
-              onChange({
-                ...draft,
-                authType,
-                privateKeyPath:
-                  authType === "privateKey" ? draft.privateKeyPath : "",
-              });
-              if (authType === "agent") {
-                setSecretDraft("");
-              }
-            }}
+          <Card.Title>{t("profile.authSection")}</Card.Title>
+        </Card.Header>
+        <Card.Content className="profile-section-content">
+          <Select
+            className="profile-field"
+            selectedKey={draft.authType}
+            onSelectionChange={updateAuthType}
+            fullWidth
           >
-            <option value="agent">{t("profile.authAgent")}</option>
-            <option value="privateKey">{t("profile.authPrivateKey")}</option>
-            <option value="password">{t("profile.authPassword")}</option>
-          </select>
-          <small>{t("profile.authHelp")}</small>
-        </label>
+            <Label>{t("profile.auth")}</Label>
+            <Select.Trigger>
+              <Select.Value />
+              <Select.Indicator />
+            </Select.Trigger>
+            <Select.Popover>
+              <ListBox>
+                {authOptions.map((option) => (
+                  <ListBox.Item key={option.id} id={option.id}>
+                    {option.label}
+                  </ListBox.Item>
+                ))}
+              </ListBox>
+            </Select.Popover>
+            <Description>{t("profile.authHelp")}</Description>
+          </Select>
         {showPrivateKey && (
-          <label>
-            {t("profile.privateKeyPath")}
-            <input
+          <TextField className="profile-field" fullWidth>
+            <Label>{t("profile.privateKeyPath")}</Label>
+            <Input
               value={draft.privateKeyPath ?? ""}
               onChange={(event) =>
                 onChange({ ...draft, privateKeyPath: event.currentTarget.value })
               }
               placeholder={t("profile.privateKeyPlaceholder")}
             />
-          </label>
+          </TextField>
         )}
         {showSecret && (
-          <label>
-            {secretLabel}
-            <input
+          <TextField className="profile-field" fullWidth>
+            <Label>{secretLabel}</Label>
+            <Input
               type="password"
               value={secretDraft}
               placeholder={t("profile.secretPlaceholder")}
               onChange={(event) => setSecretDraft(event.currentTarget.value)}
             />
-            <small>{t("profile.secretSavedHint")}</small>
-          </label>
+            <Description>{t("profile.secretSavedHint")}</Description>
+          </TextField>
         )}
-      </section>
+        </Card.Content>
+      </Card>
 
-      <section className="form-section">
-        <div className="panel-title">
+      <Card className="profile-section" variant="secondary">
+        <Card.Header className="profile-section-head">
           <FolderTree size={17} />
-          {t("profile.organizeSection")}
-        </div>
-        <div className="form-grid">
-          <label>
-            {t("profile.group")}
-            <input
-              value={draft.groupId ?? ""}
-              onChange={(event) =>
-                onChange({ ...draft, groupId: event.currentTarget.value })
-              }
-              placeholder={t("profile.groupPlaceholder")}
-            />
-          </label>
-          <label>
-            {t("profile.tags")}
-            <input
-              value={tagsToText(draft.tags)}
-              onChange={(event) =>
-                onChange({ ...draft, tags: textToTags(event.currentTarget.value) })
-              }
-              placeholder={t("profile.tagsPlaceholder")}
-            />
-          </label>
-        </div>
-        <label>
-          {t("profile.jumpHost")}
-          <select
-            value={draft.jumpHostId ?? ""}
-            onChange={(event) =>
-              onChange({ ...draft, jumpHostId: event.currentTarget.value })
+          <Card.Title>{t("profile.organizeSection")}</Card.Title>
+        </Card.Header>
+        <Card.Content className="profile-section-content">
+          <div className="form-grid">
+            <TextField className="profile-field" fullWidth>
+              <Label>{t("profile.group")}</Label>
+              <Input
+                value={draft.groupId ?? ""}
+                onChange={(event) =>
+                  onChange({ ...draft, groupId: event.currentTarget.value })
+                }
+                placeholder={t("profile.groupPlaceholder")}
+              />
+            </TextField>
+            <TextField className="profile-field" fullWidth>
+              <Label>{t("profile.tags")}</Label>
+              <Input
+                value={tagsToText(draft.tags)}
+                onChange={(event) =>
+                  onChange({ ...draft, tags: textToTags(event.currentTarget.value) })
+                }
+                placeholder={t("profile.tagsPlaceholder")}
+              />
+            </TextField>
+          </div>
+          <Select
+            className="profile-field"
+            selectedKey={draft.jumpHostId || noJumpHostKey}
+            onSelectionChange={(key) =>
+              onChange({
+                ...draft,
+                jumpHostId: key && String(key) !== noJumpHostKey ? String(key) : "",
+              })
             }
+            fullWidth
           >
-            <option value="">{t("profile.noJumpHost")}</option>
-            {jumpHostOptions.map((profile) => (
-              <option key={profile.id} value={profile.id}>
-                {profile.name} · {profile.username}@{profile.host}:{profile.port}
-              </option>
-            ))}
-          </select>
-          <small>{t("profile.jumpHostHelp")}</small>
-        </label>
-        <label className="check-row">
-          <input
-            type="checkbox"
-            checked={draft.favorite}
-            onChange={(event) =>
-              onChange({ ...draft, favorite: event.currentTarget.checked })
-            }
-          />
-          <span>{t("profile.favorite")}</span>
-          <small>{t("profile.favoriteHelp")}</small>
-        </label>
-      </section>
+            <Label>{t("profile.jumpHost")}</Label>
+            <Select.Trigger>
+              <Select.Value />
+              <Select.Indicator />
+            </Select.Trigger>
+            <Select.Popover>
+              <ListBox>
+                <ListBox.Item id={noJumpHostKey}>
+                  {t("profile.noJumpHost")}
+                </ListBox.Item>
+                {jumpHostOptions.map((profile) => (
+                  <ListBox.Item key={profile.id} id={profile.id}>
+                    {profile.name} · {profile.username}@{profile.host}:{profile.port}
+                  </ListBox.Item>
+                ))}
+              </ListBox>
+            </Select.Popover>
+            <Description>{t("profile.jumpHostHelp")}</Description>
+          </Select>
+          <Checkbox
+            className="profile-checkbox"
+            isSelected={draft.favorite}
+            onChange={(favorite) => onChange({ ...draft, favorite })}
+          >
+            <Checkbox.Control>
+              <Checkbox.Indicator />
+            </Checkbox.Control>
+            <Checkbox.Content>
+              <span>{t("profile.favorite")}</span>
+              <small>{t("profile.favoriteHelp")}</small>
+            </Checkbox.Content>
+          </Checkbox>
+        </Card.Content>
+      </Card>
 
       <div className="form-actions">
-        <button className="secondary-button" type="button" onClick={onCancel}>
+        <Button type="button" variant="outline" onPress={onCancel}>
           {t("profile.cancel")}
-        </button>
-        <button
-          className="secondary-button"
+        </Button>
+        <Button
           type="button"
-          disabled={isTesting}
-          onClick={onTest}
+          variant="outline"
+          isDisabled={isTesting}
+          onPress={onTest}
         >
           {isTesting ? (
             <Loader2 className="spin" size={16} />
@@ -242,11 +297,11 @@ export function ProfileEditor({
             <ShieldCheck size={16} />
           )}
           {t("profile.test")}
-        </button>
-        <button className="primary-button" type="submit">
+        </Button>
+        <Button type="submit" variant="primary">
           <Save size={16} />
           {t("profile.save")}
-        </button>
+        </Button>
       </div>
     </form>
   );

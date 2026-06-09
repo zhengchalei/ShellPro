@@ -1,7 +1,18 @@
 import {
+  Button,
+  Card,
+  Checkbox,
+  Input,
+  Label,
+  ListBox,
+  Select,
+  TextField,
+} from "@heroui/react";
+import {
   ChevronDown,
   Copy,
   Download,
+  FileText,
   FolderTree,
   Gauge,
   Laptop,
@@ -20,6 +31,7 @@ import {
   ShieldCheck,
   SplitSquareHorizontal,
   Star,
+  TerminalSquare,
   Trash2,
   Wand2,
   X,
@@ -28,6 +40,7 @@ import {
   ChangeEvent,
   DragEvent,
   FormEvent,
+  type Key,
   MouseEvent,
   useCallback,
   useEffect,
@@ -67,6 +80,7 @@ import {
   AiInspector,
   type AiInspectorContextMode,
 } from "./components/AiInspector";
+import { FileEditor, type FileEditorTab } from "./components/FileEditor";
 import { FileContextMenu, FileExplorer } from "./components/FileExplorer";
 import { ProfileEditor } from "./components/ProfileEditor";
 import { SessionOverview } from "./components/SessionOverview";
@@ -81,7 +95,6 @@ import {
 } from "./components/WorkspaceShell";
 import {
   filesToUploads,
-  flattenFileEntries,
   parentForFileAction,
 } from "./fileUtils";
 import { useI18n } from "./i18n";
@@ -98,8 +111,14 @@ import type {
   TerminalSession,
   WorkspaceFileEntry,
   WorkspaceFileKind,
-  WorkspaceFilePreview,
 } from "./types";
+
+const workspaceFileScopeId = "workspace";
+const terminalContentTabId = "terminal";
+const allGroupsFilterKey = "__all_groups";
+const allTagsFilterKey = "__all_tags";
+const allAuthTypesFilterKey = "__all_auth_types";
+const noTunnelProfileKey = "__no_tunnel_profile";
 
 function App() {
   const { locale, setLocale, t } = useI18n();
@@ -110,13 +129,19 @@ function App() {
     {},
   );
   const [aiConfig, setAiConfig] = useState<AiProviderConfig | null>(null);
-  const [workspaceRoot, setWorkspaceRoot] = useState("");
-  const [fileEntries, setFileEntries] = useState<WorkspaceFileEntry[]>([]);
-  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
-  const [filePreview, setFilePreview] = useState<WorkspaceFilePreview | null>(null);
-  const [expandedDirPaths, setExpandedDirPaths] = useState<Record<string, boolean>>(
-    {},
-  );
+  const [workspaceRootsBySessionId, setWorkspaceRootsBySessionId] = useState<
+    Record<string, string>
+  >({});
+  const [fileEntriesBySessionId, setFileEntriesBySessionId] = useState<
+    Record<string, WorkspaceFileEntry[]>
+  >({});
+  const [selectedFilePathBySessionId, setSelectedFilePathBySessionId] =
+    useState<Record<string, string | null>>({});
+  const [expandedDirPathsBySessionId, setExpandedDirPathsBySessionId] =
+    useState<Record<string, Record<string, boolean>>>({});
+  const [fileEditorTabs, setFileEditorTabs] = useState<FileEditorTab[]>([]);
+  const [activeContentTabBySessionId, setActiveContentTabBySessionId] =
+    useState<Record<string, string>>({});
   const [fileContextMenu, setFileContextMenu] =
     useState<FileContextMenuState>(null);
   const [fileDropTarget, setFileDropTarget] = useState<string | null>(null);
@@ -198,6 +223,32 @@ function App() {
   });
 
   const activeSession = sessions.find((session) => session.id === activeSessionId);
+  const activeFileScopeId = activeSessionId ?? workspaceFileScopeId;
+  const workspaceRoot =
+    workspaceRootsBySessionId[activeFileScopeId] ??
+    workspaceRootsBySessionId[workspaceFileScopeId] ??
+    "";
+  const fileEntries =
+    fileEntriesBySessionId[activeFileScopeId] ??
+    fileEntriesBySessionId[workspaceFileScopeId] ??
+    [];
+  const selectedFilePath =
+    selectedFilePathBySessionId[activeFileScopeId] ??
+    selectedFilePathBySessionId[workspaceFileScopeId] ??
+    null;
+  const expandedDirPaths =
+    expandedDirPathsBySessionId[activeFileScopeId] ??
+    expandedDirPathsBySessionId[workspaceFileScopeId] ??
+    {};
+  const activeContentTabId =
+    activeContentTabBySessionId[activeFileScopeId] ?? terminalContentTabId;
+  const activeFileEditorTabs = fileEditorTabs.filter(
+    (tab) => tab.sessionId === activeFileScopeId,
+  );
+  const activeFileEditorTab =
+    activeFileEditorTabs.find((tab) => tab.id === activeContentTabId) ?? null;
+  const isTerminalContentActive =
+    activeContentTabId === terminalContentTabId || !activeFileEditorTab;
   const activeBuffer = activeSessionId ? terminalBuffers[activeSessionId] ?? "" : "";
   const activeSuggestions = activeSessionId
     ? suggestionsBySessionId[activeSessionId] ?? []
@@ -216,10 +267,6 @@ function App() {
   const activeSessionLabel = activeSession
     ? `${activeSession.title} · ${t(`session.${activeSession.status}`)}`
     : t("app.noActiveSession");
-  const allFileEntries = useMemo(
-    () => flattenFileEntries(fileEntries),
-    [fileEntries],
-  );
   const profileGroups = useMemo(
     () =>
       Array.from(
@@ -310,7 +357,10 @@ function App() {
       const bootstrap = await shellProApi.bootstrap();
       setProfiles(bootstrap.profiles);
       setAiConfig(bootstrap.aiConfig);
-      setWorkspaceRoot(bootstrap.workspaceRoot || bootstrap.cwd);
+      setWorkspaceRootsBySessionId((current) => ({
+        ...current,
+        [workspaceFileScopeId]: bootstrap.workspaceRoot || bootstrap.cwd,
+      }));
       setAiDraft({
         name: bootstrap.aiConfig.name,
         baseUrl: bootstrap.aiConfig.baseUrl,
@@ -325,21 +375,32 @@ function App() {
     }
   }, []);
 
-  const refreshFileTree = useCallback(async () => {
+  const refreshFileTree = useCallback(async (sessionId?: string | null) => {
+    const scopeId = sessionId ?? workspaceFileScopeId;
     try {
-      const tree = await shellProApi.listWorkspaceFiles();
-      setWorkspaceRoot(tree.root);
-      setFileEntries(tree.entries);
-      setExpandedDirPaths((current) => {
-        if (Object.keys(current).length > 0) {
+      const tree = await shellProApi.listWorkspaceFiles(sessionId);
+      setWorkspaceRootsBySessionId((current) => ({
+        ...current,
+        [scopeId]: tree.root,
+      }));
+      setFileEntriesBySessionId((current) => ({
+        ...current,
+        [scopeId]: tree.entries,
+      }));
+      setExpandedDirPathsBySessionId((current) => {
+        if (Object.keys(current[scopeId] ?? {}).length > 0) {
           return current;
         }
-        return tree.entries.reduce<Record<string, boolean>>((next, entry) => {
+        const expanded = tree.entries.reduce<Record<string, boolean>>((next, entry) => {
           if (entry.kind === "directory") {
             next[entry.path] = true;
           }
           return next;
         }, {});
+        return {
+          ...current,
+          [scopeId]: expanded,
+        };
       });
     } catch (error) {
       setStatusMessage(String(error));
@@ -357,13 +418,17 @@ function App() {
 
   useEffect(() => {
     void refreshBootstrap();
-    void refreshFileTree();
+    void refreshFileTree(null);
     void refreshTunnels();
   }, [refreshBootstrap, refreshFileTree, refreshTunnels]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  useEffect(() => {
+    void refreshFileTree(activeSessionId ?? null);
+  }, [activeSessionId, refreshFileTree]);
 
   useEffect(() => {
     if (activeSessionId) {
@@ -412,38 +477,6 @@ function App() {
     window.addEventListener("keydown", handleEscape);
     return () => window.removeEventListener("keydown", handleEscape);
   }, [isProfileDialogOpen]);
-
-  useEffect(() => {
-    if (!selectedFilePath) {
-      setFilePreview(null);
-      return;
-    }
-
-    const entry = allFileEntries.find((item) => item.path === selectedFilePath);
-    if (!entry) {
-      setSelectedFilePath(null);
-      setFilePreview(null);
-      return;
-    }
-
-    let cancelled = false;
-    void shellProApi
-      .previewWorkspaceFile(entry.path)
-      .then((preview) => {
-        if (!cancelled) {
-          setFilePreview(preview);
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          setStatusMessage(String(error));
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [allFileEntries, selectedFilePath]);
 
   useEffect(() => {
     if (!fileContextMenu) {
@@ -577,6 +610,8 @@ function App() {
       const session = await shellProApi.startLocalSession();
       setSessions((current) => [...current, session]);
       setActiveSessionId(session.id);
+      setActiveContentTab(session.id, terminalContentTabId);
+      void refreshFileTree(session.id);
       if (session.shell === "mock") {
         setTerminalBuffers((current) => ({
           ...current,
@@ -598,6 +633,8 @@ function App() {
       const session = await shellProApi.startSshSession(profileId);
       setSessions((current) => [...current, session]);
       setActiveSessionId(session.id);
+      setActiveContentTab(session.id, terminalContentTabId);
+      void refreshFileTree(session.id);
       setViewMode("workspace");
       if (profile) {
         setRecentConnections((current) => {
@@ -660,6 +697,34 @@ function App() {
     });
     setQueue((current) => current.filter((item) => item.sessionId !== sessionId));
     setBusySessionIds((current) => {
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    setWorkspaceRootsBySessionId((current) => {
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    setFileEntriesBySessionId((current) => {
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    setSelectedFilePathBySessionId((current) => {
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    setExpandedDirPathsBySessionId((current) => {
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    setFileEditorTabs((current) =>
+      current.filter((tab) => tab.sessionId !== sessionId),
+    );
+    setActiveContentTabBySessionId((current) => {
       const next = { ...current };
       delete next[sessionId];
       return next;
@@ -1127,13 +1192,169 @@ function App() {
     }
   }
 
+  function setActiveContentTab(scopeId: string, tabId: string) {
+    setActiveContentTabBySessionId((current) => ({
+      ...current,
+      [scopeId]: tabId,
+    }));
+  }
+
+  function updateExpandedDirPaths(
+    scopeId: string,
+    updater: (current: Record<string, boolean>) => Record<string, boolean>,
+  ) {
+    setExpandedDirPathsBySessionId((current) => ({
+      ...current,
+      [scopeId]: updater(current[scopeId] ?? {}),
+    }));
+  }
+
+  function fileEditorTabId(scopeId: string, path: string) {
+    return `${scopeId}:${path}`;
+  }
+
+  async function openFileEditorTab(entry: WorkspaceFileEntry, scopeId: string) {
+    const tabId = fileEditorTabId(scopeId, entry.path);
+    setActiveContentTab(scopeId, tabId);
+    setFileEditorTabs((current) => {
+      if (current.some((tab) => tab.id === tabId)) {
+        return current;
+      }
+      return [
+        ...current,
+        {
+          id: tabId,
+          sessionId: scopeId,
+          path: entry.path,
+          name: entry.name,
+          relativePath: entry.relativePath,
+          content: "",
+          savedContent: "",
+          preview: null,
+          status: "loading",
+        },
+      ];
+    });
+
+    try {
+      const preview = await shellProApi.previewWorkspaceFile(
+        entry.path,
+        scopeId === workspaceFileScopeId ? null : scopeId,
+      );
+      setFileEditorTabs((current) =>
+        current.map((tab) =>
+          tab.id === tabId
+            ? {
+                ...tab,
+                name: preview.name,
+                relativePath: preview.relativePath,
+                content: preview.content ?? "",
+                savedContent: preview.content ?? "",
+                preview,
+                status: "ready",
+                error: undefined,
+              }
+            : tab,
+        ),
+      );
+      setStatusMessage(t("files.editorOpened", { name: preview.name }));
+    } catch (error) {
+      setFileEditorTabs((current) =>
+        current.map((tab) =>
+          tab.id === tabId
+            ? {
+                ...tab,
+                status: "error",
+                error: String(error),
+              }
+            : tab,
+        ),
+      );
+      setStatusMessage(String(error));
+    }
+  }
+
   function selectFileEntry(entry: WorkspaceFileEntry) {
-    setSelectedFilePath(entry.path);
+    const scopeId = activeFileScopeId;
+    setSelectedFilePathBySessionId((current) => ({
+      ...current,
+      [scopeId]: entry.path,
+    }));
     if (entry.kind === "directory") {
-      setExpandedDirPaths((current) => ({
+      updateExpandedDirPaths(scopeId, (current) => ({
         ...current,
         [entry.path]: !current[entry.path],
       }));
+      return;
+    }
+    void openFileEditorTab(entry, scopeId);
+  }
+
+  function updateFileEditorContent(tabId: string, content: string) {
+    setFileEditorTabs((current) =>
+      current.map((tab) => (tab.id === tabId ? { ...tab, content } : tab)),
+    );
+  }
+
+  async function saveFileEditorTab(tab: FileEditorTab) {
+    setFileEditorTabs((current) =>
+      current.map((item) =>
+        item.id === tab.id ? { ...item, status: "saving", error: undefined } : item,
+      ),
+    );
+    try {
+      await shellProApi.saveWorkspaceFile(
+        tab.path,
+        tab.content,
+        tab.sessionId === workspaceFileScopeId ? null : tab.sessionId,
+      );
+      const preview = await shellProApi.previewWorkspaceFile(
+        tab.path,
+        tab.sessionId === workspaceFileScopeId ? null : tab.sessionId,
+      );
+      setFileEditorTabs((current) =>
+        current.map((item) =>
+          item.id === tab.id
+            ? {
+                ...item,
+                name: preview.name,
+                relativePath: preview.relativePath,
+                content: preview.content ?? tab.content,
+                savedContent: preview.content ?? tab.content,
+                preview,
+                status: "ready",
+                error: undefined,
+              }
+            : item,
+        ),
+      );
+      await refreshFileTree(
+        tab.sessionId === workspaceFileScopeId ? null : tab.sessionId,
+      );
+      setStatusMessage(t("files.editorSavedName", { name: tab.name }));
+    } catch (error) {
+      setFileEditorTabs((current) =>
+        current.map((item) =>
+          item.id === tab.id
+            ? { ...item, status: "error", error: String(error) }
+            : item,
+        ),
+      );
+      setStatusMessage(String(error));
+    }
+  }
+
+  function closeFileEditorTab(tabId: string) {
+    const closing = fileEditorTabs.find((tab) => tab.id === tabId);
+    if (!closing) {
+      return;
+    }
+    setFileEditorTabs((current) => current.filter((tab) => tab.id !== tabId));
+    if (activeContentTabBySessionId[closing.sessionId] === tabId) {
+      const nextTab = fileEditorTabs.find(
+        (tab) => tab.sessionId === closing.sessionId && tab.id !== tabId,
+      );
+      setActiveContentTab(closing.sessionId, nextTab?.id ?? terminalContentTabId);
     }
   }
 
@@ -1167,9 +1388,14 @@ function App() {
     try {
       await shellProApi.createWorkspaceFile(parentPath, name, kind);
       if (parentPath) {
-        setExpandedDirPaths((current) => ({ ...current, [parentPath]: true }));
+        updateExpandedDirPaths(activeFileScopeId, (current) => ({
+          ...current,
+          [parentPath]: true,
+        }));
       }
-      await refreshFileTree();
+      await refreshFileTree(
+        activeFileScopeId === workspaceFileScopeId ? null : activeFileScopeId,
+      );
       setStatusMessage(t("files.created", { name }));
     } catch (error) {
       setStatusMessage(String(error));
@@ -1187,10 +1413,22 @@ function App() {
     try {
       await shellProApi.deleteWorkspaceFile(entry.path);
       if (selectedFilePath === entry.path) {
-        setSelectedFilePath(null);
-        setFilePreview(null);
+        setSelectedFilePathBySessionId((current) => ({
+          ...current,
+          [activeFileScopeId]: null,
+        }));
       }
-      await refreshFileTree();
+      setFileEditorTabs((current) =>
+        current.filter(
+          (tab) => !(tab.sessionId === activeFileScopeId && tab.path === entry.path),
+        ),
+      );
+      if (activeContentTabId !== terminalContentTabId) {
+        setActiveContentTab(activeFileScopeId, terminalContentTabId);
+      }
+      await refreshFileTree(
+        activeFileScopeId === workspaceFileScopeId ? null : activeFileScopeId,
+      );
       setStatusMessage(t("files.deleted", { name: entry.name }));
     } catch (error) {
       setStatusMessage(String(error));
@@ -1209,9 +1447,33 @@ function App() {
     try {
       const renamed = await shellProApi.renameWorkspaceFile(entry.path, newName);
       if (selectedFilePath === entry.path) {
-        setSelectedFilePath(renamed.path);
+        setSelectedFilePathBySessionId((current) => ({
+          ...current,
+          [activeFileScopeId]: renamed.path,
+        }));
       }
-      await refreshFileTree();
+      setFileEditorTabs((current) =>
+        current.map((tab) =>
+          tab.sessionId === activeFileScopeId && tab.path === entry.path
+            ? {
+                ...tab,
+                id: fileEditorTabId(activeFileScopeId, renamed.path),
+                path: renamed.path,
+                name: renamed.name,
+                relativePath: renamed.relativePath,
+              }
+            : tab,
+        ),
+      );
+      if (activeContentTabId === fileEditorTabId(activeFileScopeId, entry.path)) {
+        setActiveContentTab(
+          activeFileScopeId,
+          fileEditorTabId(activeFileScopeId, renamed.path),
+        );
+      }
+      await refreshFileTree(
+        activeFileScopeId === workspaceFileScopeId ? null : activeFileScopeId,
+      );
       setStatusMessage(t("files.renamed", { name: newName }));
     } catch (error) {
       setStatusMessage(String(error));
@@ -1234,9 +1496,14 @@ function App() {
     try {
       await filesToUploads(parentPath, files, setStatusMessage);
       if (parentPath) {
-        setExpandedDirPaths((current) => ({ ...current, [parentPath]: true }));
+        updateExpandedDirPaths(activeFileScopeId, (current) => ({
+          ...current,
+          [parentPath]: true,
+        }));
       }
-      await refreshFileTree();
+      await refreshFileTree(
+        activeFileScopeId === workspaceFileScopeId ? null : activeFileScopeId,
+      );
       setStatusMessage(t("files.uploaded", { count: files.length }));
     } catch (error) {
       setStatusMessage(String(error));
@@ -1308,101 +1575,145 @@ function App() {
     setSearchText("");
   }
 
+  function updateProfileGroupFilter(key: Key | null) {
+    const group = String(key || allGroupsFilterKey);
+    setProfileFilters((current) => ({
+      ...current,
+      group: group === allGroupsFilterKey ? "" : group,
+    }));
+  }
+
+  function updateProfileTagFilter(key: Key | null) {
+    const tag = String(key || allTagsFilterKey);
+    setProfileFilters((current) => ({
+      ...current,
+      tag: tag === allTagsFilterKey ? "" : tag,
+    }));
+  }
+
+  function updateProfileAuthFilter(key: Key | null) {
+    const authType = String(key || allAuthTypesFilterKey);
+    setProfileFilters((current) => ({
+      ...current,
+      authType:
+        authType === allAuthTypesFilterKey
+          ? ""
+          : (authType as ProfileFilters["authType"]),
+    }));
+  }
+
+  function updateTunnelProfile(key: Key | null) {
+    const profileId = String(key || noTunnelProfileKey);
+    setTunnelDraft((current) => ({
+      ...current,
+      profileId: profileId === noTunnelProfileKey ? "" : profileId,
+    }));
+  }
+
+  const uiTheme = terminalPreferences.theme === "light" ? "light" : "dark";
+
   return (
     <div
-      className={`app-shell ${!isSidebarVisible ? "sidebar-hidden" : ""} ${
+      className={`app-shell ${uiTheme} ${!isSidebarVisible ? "sidebar-hidden" : ""} ${
         !isInspectorVisible ? "inspector-hidden" : ""
       }`}
+      data-theme={uiTheme}
     >
       <header className="toolbar">
         <div className="toolbar-left">
-          <button
-            className="icon-button"
+          <Button
             aria-label={t("toolbar.toggleSidebar")}
-            title={t("toolbar.toggleSidebar")}
-            onClick={() => setIsSidebarVisible((value) => !value)}
+            isIconOnly
+            size="sm"
+            variant="ghost"
+            onPress={() => setIsSidebarVisible((value) => !value)}
           >
             <PanelLeft size={17} />
-          </button>
+          </Button>
           <div className="window-title">
             <ShellProLogo size="compact" />
             <span>ShellPro</span>
           </div>
         </div>
         <div className="toolbar-center">
-          <button className="toolbar-button" onClick={startLocalSession}>
+          <Button size="sm" variant="primary" onPress={startLocalSession}>
             <Plus size={16} />
             {t("toolbar.local")}
-          </button>
-          <button
-            className="toolbar-button"
-            onClick={() => setViewMode("connections")}
+          </Button>
+          <Button
+            size="sm"
+            variant={viewMode === "connections" ? "primary" : "outline"}
+            onPress={() => setViewMode("connections")}
           >
             <Server size={16} />
             {t("toolbar.ssh")}
-          </button>
-          <button
-            className={
-              terminalLayout === "single" ? "icon-button" : "icon-button active"
-            }
-            title={t("toolbar.splitTerminal")}
-            onClick={cycleTerminalLayout}
-            disabled={sessions.length === 0}
+          </Button>
+          <Button
+            aria-label={t("toolbar.splitTerminal")}
+            isDisabled={sessions.length === 0}
+            isIconOnly
+            size="sm"
+            variant={terminalLayout === "single" ? "ghost" : "primary"}
+            onPress={cycleTerminalLayout}
           >
             <SplitSquareHorizontal size={17} />
-          </button>
-          <button
-            className={
-              isTerminalSearchVisible ? "icon-button active" : "icon-button"
-            }
-            title={t("toolbar.search")}
-            onClick={() => {
+          </Button>
+          <Button
+            aria-label={t("toolbar.search")}
+            isDisabled={!activeSession}
+            isIconOnly
+            size="sm"
+            variant={isTerminalSearchVisible ? "primary" : "ghost"}
+            onPress={() => {
               setIsTerminalSearchVisible((value) => !value);
               setIsTerminalToolsVisible(false);
             }}
-            disabled={!activeSession}
           >
             <Search size={17} />
-          </button>
-          <button
-            className="icon-button"
-            title={t("toolbar.reconnect")}
-            onClick={() => void reconnectActiveSession()}
-            disabled={!activeSession}
+          </Button>
+          <Button
+            aria-label={t("toolbar.reconnect")}
+            isDisabled={!activeSession}
+            isIconOnly
+            size="sm"
+            variant="ghost"
+            onPress={() => void reconnectActiveSession()}
           >
             <RefreshCcw size={17} />
-          </button>
-          <button
-            className={
-              isTerminalToolsVisible ? "icon-button active" : "icon-button"
-            }
-            title={t("toolbar.more")}
-            onClick={() => {
+          </Button>
+          <Button
+            aria-label={t("toolbar.more")}
+            isDisabled={!activeSession}
+            isIconOnly
+            size="sm"
+            variant={isTerminalToolsVisible ? "primary" : "ghost"}
+            onPress={() => {
               setIsTerminalToolsVisible((value) => !value);
               setIsTerminalSearchVisible(false);
             }}
-            disabled={!activeSession}
           >
             <MoreHorizontal size={17} />
-          </button>
+          </Button>
         </div>
         <div className="toolbar-right">
-          <button
-            className="icon-button"
+          <Button
             aria-label={t("toolbar.toggleInspector")}
-            title={t("toolbar.toggleInspector")}
-            onClick={() => setIsInspectorVisible((value) => !value)}
+            isIconOnly
+            size="sm"
+            variant={isInspectorVisible ? "primary" : "ghost"}
+            onPress={() => setIsInspectorVisible((value) => !value)}
           >
             <PanelRight size={17} />
-          </button>
-          <button
-            className="icon-button"
+          </Button>
+          <Button
             aria-label={t("toolbar.settings")}
-            title={t("toolbar.settings")}
-            onClick={() => setViewMode("settings")}
+            isIconOnly
+            size="sm"
+            variant={viewMode === "settings" ? "primary" : "ghost"}
+            onPress={() => setViewMode("settings")}
           >
             <Settings size={17} />
-          </button>
+          </Button>
         </div>
       </header>
 
@@ -1415,104 +1726,132 @@ function App() {
           }}
         >
           <Search size={15} />
-          <input
-            value={terminalSearchText}
-            onChange={(event) => setTerminalSearchText(event.currentTarget.value)}
-            placeholder={t("terminal.searchPlaceholder")}
-            autoFocus
-          />
-          <button className="mini-button" type="submit">
+          <TextField
+            aria-label={t("terminal.searchPlaceholder")}
+            className="terminal-search-field"
+          >
+            <Input
+              value={terminalSearchText}
+              onChange={(event) =>
+                setTerminalSearchText(event.currentTarget.value)
+              }
+              placeholder={t("terminal.searchPlaceholder")}
+              autoFocus
+            />
+          </TextField>
+          <Button size="sm" type="submit" variant="primary">
             {t("terminal.findNext")}
-          </button>
-          <button
-            className="mini-button"
+          </Button>
+          <Button
+            size="sm"
             type="button"
-            onClick={() => searchActiveTerminal("previous")}
+            variant="outline"
+            onPress={() => searchActiveTerminal("previous")}
           >
             {t("terminal.findPrevious")}
-          </button>
-          <button
-            className="icon-button compact"
+          </Button>
+          <Button
+            aria-label={t("terminal.closeSearch")}
+            isIconOnly
+            size="sm"
             type="button"
-            title={t("terminal.closeSearch")}
-            onClick={() => setIsTerminalSearchVisible(false)}
+            variant="ghost"
+            onPress={() => setIsTerminalSearchVisible(false)}
           >
             <X size={13} />
-          </button>
+          </Button>
         </form>
       )}
 
       {isTerminalToolsVisible && (
         <div className="floating-terminal-panel terminal-tools-panel">
-          <button className="mini-button" onClick={() => void copyTerminalSelection()}>
+          <Button
+            size="sm"
+            variant="outline"
+            onPress={() => void copyTerminalSelection()}
+          >
             <Copy size={13} />
             {t("terminal.copySelection")}
-          </button>
-          <button className="mini-button" onClick={() => void pasteClipboardIntoTerminal()}>
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onPress={() => void pasteClipboardIntoTerminal()}
+          >
             <Send size={13} />
             {t("terminal.paste")}
-          </button>
-          <button className="mini-button" onClick={clearActiveTerminal}>
+          </Button>
+          <Button size="sm" variant="outline" onPress={clearActiveTerminal}>
             <Trash2 size={13} />
             {t("terminal.clear")}
-          </button>
-          <button className="mini-button" onClick={useTerminalSelectionForAi}>
+          </Button>
+          <Button size="sm" variant="outline" onPress={useTerminalSelectionForAi}>
             <Wand2 size={13} />
             {t("terminal.useSelectionForAi")}
-          </button>
+          </Button>
         </div>
       )}
 
       {isSidebarVisible && (
         <aside className="sidebar">
           <div className="sidebar-section">
-            <div className="search-field">
+            <TextField
+              aria-label={t("sidebar.searchConnections")}
+              className="search-field"
+            >
               <Search size={15} />
-              <input
+              <Input
                 value={searchText}
                 onChange={(event) => setSearchText(event.currentTarget.value)}
                 placeholder={t("sidebar.searchConnections")}
               />
-            </div>
+            </TextField>
           </div>
 
           <nav className="sidebar-nav">
-            <button
-              className={viewMode === "workspace" ? "nav-item active" : "nav-item"}
-              onClick={() => setViewMode("workspace")}
+            <Button
+              className="nav-item"
+              fullWidth
+              size="sm"
+              variant={viewMode === "workspace" ? "primary" : "ghost"}
+              onPress={() => setViewMode("workspace")}
             >
               <Laptop size={16} />
               {t("sidebar.workspace")}
-            </button>
-            <button
-              className={
-                viewMode === "connections" ? "nav-item active" : "nav-item"
-              }
-              onClick={() => setViewMode("connections")}
+            </Button>
+            <Button
+              className="nav-item"
+              fullWidth
+              size="sm"
+              variant={viewMode === "connections" ? "primary" : "ghost"}
+              onPress={() => setViewMode("connections")}
             >
               <FolderTree size={16} />
               {t("sidebar.connections")}
-            </button>
-            <button
-              className={viewMode === "settings" ? "nav-item active" : "nav-item"}
-              onClick={() => setViewMode("settings")}
+            </Button>
+            <Button
+              className="nav-item"
+              fullWidth
+              size="sm"
+              variant={viewMode === "settings" ? "primary" : "ghost"}
+              onPress={() => setViewMode("settings")}
             >
               <Settings size={16} />
               {t("sidebar.settings")}
-            </button>
+            </Button>
           </nav>
 
           <FileExplorer
             entries={fileEntries}
             workspaceRoot={workspaceRoot}
+            scopeLabel={activeSession?.title ?? t("files.workspaceScope")}
             selectedPath={selectedFilePath}
-            preview={filePreview}
             expandedDirPaths={expandedDirPaths}
             dropTargetPath={fileDropTarget}
             isBusy={isFileBusy}
             onSelect={selectFileEntry}
             onToggleDirectory={(path) =>
-              setExpandedDirPaths((current) => ({
+              updateExpandedDirPaths(activeFileScopeId, (current) => ({
                 ...current,
                 [path]: !current[path],
               }))
@@ -1520,6 +1859,13 @@ function App() {
             onContextMenu={showFileContextMenu}
             onCreate={createWorkspaceFile}
             onUpload={openUploadPicker}
+            onRefresh={() =>
+              void refreshFileTree(
+                activeFileScopeId === workspaceFileScopeId
+                  ? null
+                  : activeFileScopeId,
+              )
+            }
             onDragOver={(event, parentPath) => {
               event.preventDefault();
               setFileDropTarget(parentPath || workspaceRoot || null);
@@ -1613,28 +1959,35 @@ function App() {
           >
             <div className="tab-strip">
               {sessions.map((session) => (
-                <button
+                <div
                   className={
                     session.id === activeSessionId ? "tab-item active" : "tab-item"
                   }
                   key={session.id}
-                  onClick={() => setActiveSessionId(session.id)}
                 >
-                  <span className={`status-dot ${session.status}`} />
-                  {session.title}
-                  <span className="tab-kind">{t(`session.${session.kind}`)}</span>
-                  <span
+                  <Button
+                    className="tab-main"
+                    size="sm"
+                    variant="ghost"
+                    onPress={() => setActiveSessionId(session.id)}
+                  >
+                    <span className={`status-dot ${session.status}`} />
+                    <span>{session.title}</span>
+                    <span className="tab-kind">
+                      {t(`session.${session.kind}`)}
+                    </span>
+                  </Button>
+                  <Button
+                    aria-label={t("session.close")}
                     className="tab-close"
-                    role="button"
-                    tabIndex={0}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void closeSession(session.id);
-                    }}
+                    isIconOnly
+                    size="sm"
+                    variant="ghost"
+                    onPress={() => void closeSession(session.id)}
                   >
                     <X size={13} />
-                  </span>
-                </button>
+                  </Button>
+                </div>
               ))}
             </div>
 
@@ -1651,6 +2004,63 @@ function App() {
               />
             )}
 
+            {sessions.length > 0 && (
+              <div className="session-subtabs">
+                <Button
+                  className={
+                    isTerminalContentActive
+                      ? "session-subtab active"
+                      : "session-subtab"
+                  }
+                  size="sm"
+                  variant={isTerminalContentActive ? "primary" : "ghost"}
+                  onPress={() =>
+                    setActiveContentTab(activeFileScopeId, terminalContentTabId)
+                  }
+                >
+                  <TerminalSquare size={14} />
+                  {t("files.terminalTab")}
+                </Button>
+                {activeFileEditorTabs.map((tab) => (
+                  <div
+                    className={
+                      tab.id === activeContentTabId && activeFileEditorTab
+                        ? "session-subtab active"
+                        : "session-subtab"
+                    }
+                    key={tab.id}
+                    title={tab.path}
+                  >
+                    <Button
+                      className="session-subtab-main"
+                      size="sm"
+                      variant="ghost"
+                      onPress={() => setActiveContentTab(activeFileScopeId, tab.id)}
+                    >
+                      <FileText size={14} />
+                      <span>{tab.name}</span>
+                      {tab.content !== tab.savedContent && (
+                        <span
+                          className="dirty-dot"
+                          aria-label={t("files.editorUnsaved")}
+                        />
+                      )}
+                    </Button>
+                    <Button
+                      aria-label={t("files.closeEditor")}
+                      className="tab-close"
+                      isIconOnly
+                      size="sm"
+                      variant="ghost"
+                      onPress={() => closeFileEditorTab(tab.id)}
+                    >
+                      <X size={12} />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {sessions.length === 0 ? (
               <EmptyWorkspace
                 onLocal={startLocalSession}
@@ -1659,25 +2069,51 @@ function App() {
                 t={t}
               />
             ) : (
-              <div className={`terminal-stack layout-${terminalLayout}`}>
-                {sessions.map((session) => (
-                  <TerminalPane
-                    key={session.id}
-                    ref={(handle) => {
-                      terminalHandlesRef.current[session.id] = handle;
-                    }}
-                    session={session}
-                    active={session.id === activeSessionId}
-                    visible={visibleSessionIds.has(session.id)}
-                    preferences={terminalPreferences}
-                    onActivate={() => setActiveSessionId(session.id)}
-                    onBufferChange={appendBuffer}
-                    onStatusChange={updateSessionStatus}
-                    terminalHint={t("terminal.bannerHint")}
-                    disconnectedMessage={t("terminal.disconnected")}
+              <>
+                <div
+                  className={[
+                    "terminal-stack",
+                    `layout-${terminalLayout}`,
+                    isTerminalContentActive ? "" : "is-hidden",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                >
+                  {sessions.map((session) => (
+                    <TerminalPane
+                      key={session.id}
+                      ref={(handle) => {
+                        terminalHandlesRef.current[session.id] = handle;
+                      }}
+                      session={session}
+                      active={session.id === activeSessionId}
+                      visible={
+                        isTerminalContentActive && visibleSessionIds.has(session.id)
+                      }
+                      preferences={terminalPreferences}
+                      onActivate={() => setActiveSessionId(session.id)}
+                      onBufferChange={appendBuffer}
+                      onStatusChange={updateSessionStatus}
+                      terminalHint={t("terminal.bannerHint")}
+                      disconnectedMessage={t("terminal.disconnected")}
+                    />
+                  ))}
+                </div>
+                {!isTerminalContentActive && activeFileEditorTab && (
+                  <FileEditor
+                    tab={activeFileEditorTab}
+                    onChange={(content) =>
+                      updateFileEditorContent(activeFileEditorTab.id, content)
+                    }
+                    onSave={() => void saveFileEditorTab(activeFileEditorTab)}
+                    onClose={() => closeFileEditorTab(activeFileEditorTab.id)}
+                    onShowTerminal={() =>
+                      setActiveContentTab(activeFileScopeId, terminalContentTabId)
+                    }
+                    t={t}
                   />
-                ))}
-              </div>
+                )}
+              </>
             )}
           </section>
         )}
@@ -1690,185 +2126,222 @@ function App() {
                 <h1>{t("connections.sshProfiles")}</h1>
               </div>
               <div className="view-actions">
-                <button
-                  className="secondary-button"
-                  onClick={openImportConfigPicker}
-                >
+                <Button variant="outline" onPress={openImportConfigPicker}>
                   <Download size={16} />
                   {t("workspace.importConfig")}
-                </button>
-                <button
-                  className="toolbar-button"
-                  onClick={openCreateProfile}
-                >
+                </Button>
+                <Button variant="primary" onPress={openCreateProfile}>
                   <Plus size={16} />
                   {t("connections.new")}
-                </button>
+                </Button>
               </div>
             </div>
             <div className="manager-grid">
-              <div className="connection-summary">
-                <div className="summary-stats">
-                  <div className="summary-stat">
-                    <strong>{profiles.length}</strong>
-                    <span>{t("connections.totalProfiles")}</span>
+              <Card className="connection-summary" variant="secondary">
+                <Card.Content className="connection-summary-content">
+                  <div className="summary-stats">
+                    <Card className="summary-stat" variant="default">
+                      <Card.Content>
+                        <strong>{profiles.length}</strong>
+                        <span>{t("connections.totalProfiles")}</span>
+                      </Card.Content>
+                    </Card>
+                    <Card className="summary-stat" variant="default">
+                      <Card.Content>
+                        <strong>{favoriteProfiles.length}</strong>
+                        <span>{t("connections.favoriteProfiles")}</span>
+                      </Card.Content>
+                    </Card>
+                    <Card className="summary-stat" variant="default">
+                      <Card.Content>
+                        <strong>{activeSshSessionCount}</strong>
+                        <span>{t("connections.activeSsh")}</span>
+                      </Card.Content>
+                    </Card>
+                    <Card className="summary-stat" variant="default">
+                      <Card.Content>
+                        <strong>{activeTunnelCount}</strong>
+                        <span>{t("tunnel.active")}</span>
+                      </Card.Content>
+                    </Card>
                   </div>
-                  <div className="summary-stat">
-                    <strong>{favoriteProfiles.length}</strong>
-                    <span>{t("connections.favoriteProfiles")}</span>
-                  </div>
-                  <div className="summary-stat">
-                    <strong>{activeSshSessionCount}</strong>
-                    <span>{t("connections.activeSsh")}</span>
-                  </div>
-                  <div className="summary-stat">
-                    <strong>{activeTunnelCount}</strong>
-                    <span>{t("tunnel.active")}</span>
-                  </div>
-                </div>
-                <div className="recent-connections">
-                  <div className="panel-title">
-                    <RefreshCcw size={16} />
-                    {t("connections.recent")}
-                  </div>
-                  {recentProfiles.length === 0 ? (
-                    <p className="muted tight">{t("connections.noRecent")}</p>
-                  ) : (
-                    recentProfiles.map(({ recent, profile }) => (
-                      <div className="recent-connection" key={recent.profileId}>
-                        <button onClick={() => void startSshSession(profile.id)}>
-                          <Server size={14} />
-                          <span>{recent.name}</span>
-                        </button>
-                        <small>
-                          {recent.endpoint} · {t("connections.usedTimes", { count: recent.count })}
-                        </small>
-                      </div>
-                    ))
-                  )}
-                </div>
-                <div className="tunnel-panel">
-                  <div className="panel-title">
-                    <Shuffle size={16} />
-                    {t("tunnel.active")}
-                  </div>
-                  {activeTunnels.length === 0 ? (
-                    <p className="muted tight">{t("tunnel.empty")}</p>
-                  ) : (
-                    activeTunnels.map((tunnel) => (
-                      <div className="tunnel-row" key={tunnel.id}>
-                        <div>
-                          <strong>
-                            {tunnel.localHost}:{tunnel.localPort}
-                          </strong>
-                          <span>
-                            {tunnel.remoteHost}:{tunnel.remotePort} ·{" "}
-                            {tunnel.profileName}
-                          </span>
-                        </div>
-                        <button
-                          className="mini-button"
-                          disabled={stoppingTunnelIds[tunnel.id]}
-                          onClick={() => void stopTunnel(tunnel.id)}
-                        >
-                          {stoppingTunnelIds[tunnel.id] ? (
-                            <Loader2 className="spin" size={13} />
-                          ) : (
-                            <X size={13} />
-                          )}
-                          {t("tunnel.stop")}
-                        </button>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
+                  <Card className="recent-connections" variant="default">
+                    <Card.Header className="panel-title">
+                      <RefreshCcw size={16} />
+                      {t("connections.recent")}
+                    </Card.Header>
+                    <Card.Content className="recent-connections-content">
+                      {recentProfiles.length === 0 ? (
+                        <p className="muted tight">{t("connections.noRecent")}</p>
+                      ) : (
+                        recentProfiles.map(({ recent, profile }) => (
+                          <div
+                            className="recent-connection"
+                            key={recent.profileId}
+                          >
+                            <Button
+                              fullWidth
+                              size="sm"
+                              variant="ghost"
+                              onPress={() => void startSshSession(profile.id)}
+                            >
+                              <Server size={14} />
+                              <span>{recent.name}</span>
+                            </Button>
+                            <small>
+                              {recent.endpoint} ·{" "}
+                              {t("connections.usedTimes", {
+                                count: recent.count,
+                              })}
+                            </small>
+                          </div>
+                        ))
+                      )}
+                    </Card.Content>
+                  </Card>
+                  <Card className="tunnel-panel" variant="default">
+                    <Card.Header className="panel-title">
+                      <Shuffle size={16} />
+                      {t("tunnel.active")}
+                    </Card.Header>
+                    <Card.Content className="tunnel-panel-content">
+                      {activeTunnels.length === 0 ? (
+                        <p className="muted tight">{t("tunnel.empty")}</p>
+                      ) : (
+                        activeTunnels.map((tunnel) => (
+                          <div className="tunnel-row" key={tunnel.id}>
+                            <div>
+                              <strong>
+                                {tunnel.localHost}:{tunnel.localPort}
+                              </strong>
+                              <span>
+                                {tunnel.remoteHost}:{tunnel.remotePort} ·{" "}
+                                {tunnel.profileName}
+                              </span>
+                            </div>
+                            <Button
+                              isDisabled={stoppingTunnelIds[tunnel.id]}
+                              size="sm"
+                              variant="outline"
+                              onPress={() => void stopTunnel(tunnel.id)}
+                            >
+                              {stoppingTunnelIds[tunnel.id] ? (
+                                <Loader2 className="spin" size={13} />
+                              ) : (
+                                <X size={13} />
+                              )}
+                              {t("tunnel.stop")}
+                            </Button>
+                          </div>
+                        ))
+                      )}
+                    </Card.Content>
+                  </Card>
+                </Card.Content>
+              </Card>
               <div className="profile-filter-bar">
-                <div className="filter-field">
-                  <span>{t("connections.filterGroup")}</span>
-                  <select
-                    value={profileFilters.group}
-                    onChange={(event) => {
-                      const group = event.currentTarget.value;
-                      setProfileFilters((current) => ({
-                        ...current,
-                        group,
-                      }));
-                    }}
-                  >
-                    <option value="">{t("connections.allGroups")}</option>
-                    {profileGroups.map((group) => (
-                      <option key={group} value={group}>
-                        {group}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="filter-field">
-                  <span>{t("connections.filterTag")}</span>
-                  <select
-                    value={profileFilters.tag}
-                    onChange={(event) => {
-                      const tag = event.currentTarget.value;
-                      setProfileFilters((current) => ({
-                        ...current,
-                        tag,
-                      }));
-                    }}
-                  >
-                    <option value="">{t("connections.allTags")}</option>
-                    {profileTags.map((tag) => (
-                      <option key={tag} value={tag}>
-                        {tag}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="filter-field">
-                  <span>{t("connections.filterAuth")}</span>
-                  <select
-                    value={profileFilters.authType}
-                    onChange={(event) => {
-                      const authType = event.currentTarget
-                        .value as ProfileFilters["authType"];
-                      setProfileFilters((current) => ({
-                        ...current,
-                        authType,
-                      }));
-                    }}
-                  >
-                    <option value="">{t("connections.allAuthTypes")}</option>
-                    <option value="agent">{t("profile.authAgent")}</option>
-                    <option value="privateKey">{t("profile.authPrivateKey")}</option>
-                    <option value="password">{t("profile.authPassword")}</option>
-                  </select>
-                </div>
-                <label className="filter-check">
-                  <input
-                    type="checkbox"
-                    checked={profileFilters.favoritesOnly}
-                    onChange={(event) => {
-                      const favoritesOnly = event.currentTarget.checked;
-                      setProfileFilters((current) => ({
-                        ...current,
-                        favoritesOnly,
-                      }));
-                    }}
-                  />
-                  <span>{t("connections.favoritesOnly")}</span>
-                </label>
+                <Select
+                  className="filter-field"
+                  selectedKey={profileFilters.group || allGroupsFilterKey}
+                  onSelectionChange={updateProfileGroupFilter}
+                >
+                  <Label>{t("connections.filterGroup")}</Label>
+                  <Select.Trigger>
+                    <Select.Value />
+                    <Select.Indicator />
+                  </Select.Trigger>
+                  <Select.Popover>
+                    <ListBox>
+                      <ListBox.Item id={allGroupsFilterKey}>
+                        {t("connections.allGroups")}
+                      </ListBox.Item>
+                      {profileGroups.map((group) => (
+                        <ListBox.Item key={group} id={group}>
+                          {group}
+                        </ListBox.Item>
+                      ))}
+                    </ListBox>
+                  </Select.Popover>
+                </Select>
+                <Select
+                  className="filter-field"
+                  selectedKey={profileFilters.tag || allTagsFilterKey}
+                  onSelectionChange={updateProfileTagFilter}
+                >
+                  <Label>{t("connections.filterTag")}</Label>
+                  <Select.Trigger>
+                    <Select.Value />
+                    <Select.Indicator />
+                  </Select.Trigger>
+                  <Select.Popover>
+                    <ListBox>
+                      <ListBox.Item id={allTagsFilterKey}>
+                        {t("connections.allTags")}
+                      </ListBox.Item>
+                      {profileTags.map((tag) => (
+                        <ListBox.Item key={tag} id={tag}>
+                          {tag}
+                        </ListBox.Item>
+                      ))}
+                    </ListBox>
+                  </Select.Popover>
+                </Select>
+                <Select
+                  className="filter-field"
+                  selectedKey={profileFilters.authType || allAuthTypesFilterKey}
+                  onSelectionChange={updateProfileAuthFilter}
+                >
+                  <Label>{t("connections.filterAuth")}</Label>
+                  <Select.Trigger>
+                    <Select.Value />
+                    <Select.Indicator />
+                  </Select.Trigger>
+                  <Select.Popover>
+                    <ListBox>
+                      <ListBox.Item id={allAuthTypesFilterKey}>
+                        {t("connections.allAuthTypes")}
+                      </ListBox.Item>
+                      <ListBox.Item id="agent">
+                        {t("profile.authAgent")}
+                      </ListBox.Item>
+                      <ListBox.Item id="privateKey">
+                        {t("profile.authPrivateKey")}
+                      </ListBox.Item>
+                      <ListBox.Item id="password">
+                        {t("profile.authPassword")}
+                      </ListBox.Item>
+                    </ListBox>
+                  </Select.Popover>
+                </Select>
+                <Checkbox
+                  className="filter-check"
+                  isSelected={profileFilters.favoritesOnly}
+                  onChange={(favoritesOnly) => {
+                    setProfileFilters((current) => ({
+                      ...current,
+                      favoritesOnly,
+                    }));
+                  }}
+                >
+                  <Checkbox.Control>
+                    <Checkbox.Indicator />
+                  </Checkbox.Control>
+                  <Checkbox.Content>
+                    {t("connections.favoritesOnly")}
+                  </Checkbox.Content>
+                </Checkbox>
                 <div className="filter-result">
                   {t("connections.filteredCount", {
                     count: filteredProfiles.length,
                     total: profiles.length,
                   })}
                 </div>
-                <button className="mini-button" onClick={resetProfileFilters}>
+                <Button size="sm" variant="outline" onPress={resetProfileFilters}>
                   <X size={13} />
                   {t("connections.clearFilters")}
-                </button>
+                </Button>
               </div>
-              <div className="profile-table">
+              <Card className="profile-table" variant="secondary">
                 {filteredProfiles.map((profile) => (
                   <div className="profile-row" key={profile.id}>
                     <div className="profile-row-main">
@@ -1893,60 +2366,72 @@ function App() {
                       </span>
                     </div>
                     <div className="row-actions">
-                      <button
-                        className="icon-button"
-                        title={t("connections.connect")}
-                        onClick={() => void startSshSession(profile.id)}
+                      <Button
+                        aria-label={t("connections.connect")}
+                        isIconOnly
+                        size="sm"
+                        variant="ghost"
+                        onPress={() => void startSshSession(profile.id)}
                       >
                         <Play size={15} />
-                      </button>
-                      <button
-                        className="icon-button"
-                        disabled={testingProfileIds[profile.id]}
-                        title={t("connections.test")}
-                        onClick={() => void testConnectionProfile(profile)}
+                      </Button>
+                      <Button
+                        aria-label={t("connections.test")}
+                        isDisabled={testingProfileIds[profile.id]}
+                        isIconOnly
+                        size="sm"
+                        variant="ghost"
+                        onPress={() => void testConnectionProfile(profile)}
                       >
                         {testingProfileIds[profile.id] ? (
                           <Loader2 className="spin" size={15} />
                         ) : (
                           <ShieldCheck size={15} />
                         )}
-                      </button>
-                      <button
-                        className="icon-button"
-                        title={t("tunnel.open")}
-                        onClick={() => openTunnelDialog(profile)}
+                      </Button>
+                      <Button
+                        aria-label={t("tunnel.open")}
+                        isIconOnly
+                        size="sm"
+                        variant="ghost"
+                        onPress={() => openTunnelDialog(profile)}
                       >
                         <Shuffle size={15} />
-                      </button>
-                      <button
-                        className="icon-button"
-                        title={t("connections.edit")}
-                        onClick={() => editProfile(profile)}
+                      </Button>
+                      <Button
+                        aria-label={t("connections.edit")}
+                        isIconOnly
+                        size="sm"
+                        variant="ghost"
+                        onPress={() => editProfile(profile)}
                       >
                         <Settings size={15} />
-                      </button>
-                      <button
-                        className="icon-button"
-                        title={t("connections.clone")}
-                        onClick={() => cloneProfile(profile)}
+                      </Button>
+                      <Button
+                        aria-label={t("connections.clone")}
+                        isIconOnly
+                        size="sm"
+                        variant="ghost"
+                        onPress={() => cloneProfile(profile)}
                       >
                         <Copy size={15} />
-                      </button>
-                      <button
-                        className="icon-button danger"
-                        title={t("connections.delete")}
-                        onClick={() => void deleteProfile(profile.id)}
+                      </Button>
+                      <Button
+                        aria-label={t("connections.delete")}
+                        isIconOnly
+                        size="sm"
+                        variant="danger-soft"
+                        onPress={() => void deleteProfile(profile.id)}
                       >
                         <Trash2 size={15} />
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 ))}
                 {filteredProfiles.length === 0 && (
                   <div className="empty-table">{t("connections.noMatches")}</div>
                 )}
-              </div>
+              </Card>
             </div>
           </section>
         )}
@@ -2024,81 +2509,90 @@ function App() {
                 <p className="eyebrow">{t("tunnel.subtitle")}</p>
                 <h2 id="tunnel-dialog-title">{t("tunnel.title")}</h2>
               </div>
-              <button
-                className="icon-button compact"
+              <Button
+                aria-label={t("app.cancel")}
+                isIconOnly
+                size="sm"
                 type="button"
-                onClick={closeTunnelDialog}
+                variant="ghost"
+                onPress={closeTunnelDialog}
               >
                 <X size={16} />
-              </button>
+              </Button>
             </div>
             <div className="form-section">
-              <label>
-                {t("tunnel.profile")}
-                <select
-                  value={tunnelDraft.profileId}
-                  onChange={(event) => {
-                    const profileId = event.currentTarget.value;
-                    setTunnelDraft((current) => ({ ...current, profileId }));
-                  }}
-                >
-                  <option value="">{t("tunnel.chooseProfile")}</option>
-                  {profiles.map((profile) => (
-                    <option key={profile.id} value={profile.id}>
-                      {profile.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <Select
+                selectedKey={tunnelDraft.profileId || noTunnelProfileKey}
+                onSelectionChange={updateTunnelProfile}
+                fullWidth
+              >
+                <Label>{t("tunnel.profile")}</Label>
+                <Select.Trigger>
+                  <Select.Value />
+                  <Select.Indicator />
+                </Select.Trigger>
+                <Select.Popover>
+                  <ListBox>
+                    <ListBox.Item id={noTunnelProfileKey}>
+                      {t("tunnel.chooseProfile")}
+                    </ListBox.Item>
+                    {profiles.map((profile) => (
+                      <ListBox.Item key={profile.id} id={profile.id}>
+                        {profile.name}
+                      </ListBox.Item>
+                    ))}
+                  </ListBox>
+                </Select.Popover>
+              </Select>
               <div className="split-fields">
-                <label>
-                  {t("tunnel.localHost")}
-                  <input
+                <TextField fullWidth>
+                  <Label>{t("tunnel.localHost")}</Label>
+                  <Input
                     value={tunnelDraft.localHost}
                     onChange={(event) => {
                       const localHost = event.currentTarget.value;
                       setTunnelDraft((current) => ({ ...current, localHost }));
                     }}
                   />
-                </label>
-                <label>
-                  {t("tunnel.localPort")}
-                  <input
+                </TextField>
+                <TextField fullWidth>
+                  <Label>{t("tunnel.localPort")}</Label>
+                  <Input
                     type="number"
                     min={1}
                     max={65535}
-                    value={tunnelDraft.localPort}
+                    value={String(tunnelDraft.localPort)}
                     onChange={(event) => {
                       const localPort = Number(event.currentTarget.value);
                       setTunnelDraft((current) => ({ ...current, localPort }));
                     }}
                   />
-                </label>
+                </TextField>
               </div>
               <div className="split-fields">
-                <label>
-                  {t("tunnel.remoteHost")}
-                  <input
+                <TextField fullWidth>
+                  <Label>{t("tunnel.remoteHost")}</Label>
+                  <Input
                     value={tunnelDraft.remoteHost}
                     onChange={(event) => {
                       const remoteHost = event.currentTarget.value;
                       setTunnelDraft((current) => ({ ...current, remoteHost }));
                     }}
                   />
-                </label>
-                <label>
-                  {t("tunnel.remotePort")}
-                  <input
+                </TextField>
+                <TextField fullWidth>
+                  <Label>{t("tunnel.remotePort")}</Label>
+                  <Input
                     type="number"
                     min={1}
                     max={65535}
-                    value={tunnelDraft.remotePort}
+                    value={String(tunnelDraft.remotePort)}
                     onChange={(event) => {
                       const remotePort = Number(event.currentTarget.value);
                       setTunnelDraft((current) => ({ ...current, remotePort }));
                     }}
                   />
-                </label>
+                </TextField>
               </div>
               <p className="muted tight">
                 {tunnelProfileUnsupported
@@ -2107,21 +2601,21 @@ function App() {
               </p>
             </div>
             <div className="form-actions">
-              <button
-                className="secondary-button"
+              <Button
                 type="button"
-                onClick={closeTunnelDialog}
+                variant="outline"
+                onPress={closeTunnelDialog}
               >
                 {t("app.cancel")}
-              </button>
-              <button
-                className="primary-button"
-                disabled={
+              </Button>
+              <Button
+                isDisabled={
                   isStartingTunnel ||
                   tunnelProfileUnsupported ||
                   !tunnelDraft.profileId
                 }
                 type="submit"
+                variant="primary"
               >
                 {isStartingTunnel ? (
                   <Loader2 className="spin" size={16} />
@@ -2129,7 +2623,7 @@ function App() {
                   <Gauge size={16} />
                 )}
                 {t("tunnel.start")}
-              </button>
+              </Button>
             </div>
           </form>
         </div>

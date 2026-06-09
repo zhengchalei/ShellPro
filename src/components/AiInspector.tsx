@@ -1,3 +1,4 @@
+import { Button, Card, TextArea } from "@heroui/react";
 import {
   Loader2,
   Play,
@@ -97,47 +98,59 @@ export function AiInspector({
         </span>
       </div>
 
-      <form className="ai-form" onSubmit={onAskAi}>
-        <div className="segmented">
-          <button
-            type="button"
-            className={selectedContextMode === "recent" ? "active" : ""}
-            onClick={() => onSelectedContextModeChange("recent")}
-          >
-            {t("ai.recent")}
-          </button>
-          <button
-            type="button"
-            className={selectedContextMode === "selected" ? "active" : ""}
-            onClick={() => onSelectedContextModeChange("selected")}
-          >
-            {t("ai.selected")}
-          </button>
-        </div>
-        {selectedContextMode === "selected" && (
-          <textarea
-            className="context-input"
-            value={manualSelection}
-            onChange={(event) =>
-              onManualSelectionChange(event.currentTarget.value)
-            }
-            placeholder={t("ai.pasteSelected")}
-          />
-        )}
-        <textarea
-          value={aiQuestion}
-          onChange={(event) => onAiQuestionChange(event.currentTarget.value)}
-          placeholder={t("ai.askPlaceholder")}
-        />
-        <button
-          className="primary-button"
-          type="submit"
-          disabled={isAiBusy || !hasActiveSession}
-        >
-          {isAiBusy ? <Loader2 className="spin" size={16} /> : <Wand2 size={16} />}
-          {t("ai.suggestCommands")}
-        </button>
-      </form>
+      <Card className="ai-form-card" variant="secondary">
+        <Card.Content>
+          <form className="ai-form" onSubmit={onAskAi}>
+            <div className="segmented">
+              <Button
+                size="sm"
+                type="button"
+                variant={selectedContextMode === "recent" ? "primary" : "ghost"}
+                onPress={() => onSelectedContextModeChange("recent")}
+              >
+                {t("ai.recent")}
+              </Button>
+              <Button
+                size="sm"
+                type="button"
+                variant={selectedContextMode === "selected" ? "primary" : "ghost"}
+                onPress={() => onSelectedContextModeChange("selected")}
+              >
+                {t("ai.selected")}
+              </Button>
+            </div>
+            {selectedContextMode === "selected" && (
+              <TextArea
+                aria-label={t("ai.pasteSelected")}
+                className="context-input"
+                value={manualSelection}
+                onChange={(event) =>
+                  onManualSelectionChange(event.currentTarget.value)
+                }
+                placeholder={t("ai.pasteSelected")}
+              />
+            )}
+            <TextArea
+              aria-label={t("ai.askPlaceholder")}
+              value={aiQuestion}
+              onChange={(event) => onAiQuestionChange(event.currentTarget.value)}
+              placeholder={t("ai.askPlaceholder")}
+            />
+            <Button
+              isDisabled={isAiBusy || !hasActiveSession}
+              type="submit"
+              variant="primary"
+            >
+              {isAiBusy ? (
+                <Loader2 className="spin" size={16} />
+              ) : (
+                <Wand2 size={16} />
+              )}
+              {t("ai.suggestCommands")}
+            </Button>
+          </form>
+        </Card.Content>
+      </Card>
 
       <QuickCommandPanel
         templates={quickCommands}
@@ -151,15 +164,17 @@ export function AiInspector({
         t={t}
       />
 
-      <div className="context-preview">
-        <div className="panel-title">
+      <Card className="context-preview" variant="secondary">
+        <Card.Header className="panel-title">
           <ShieldAlert size={16} />
           {t("ai.contextPreview")}
-        </div>
-        <pre ref={contextPreviewRef}>
-          {contextPreview || t("ai.openTerminalContext")}
-        </pre>
-      </div>
+        </Card.Header>
+        <Card.Content>
+          <pre ref={contextPreviewRef}>
+            {contextPreview || t("ai.openTerminalContext")}
+          </pre>
+        </Card.Content>
+      </Card>
 
       <div className="suggestion-list">
         {activeSuggestions.length === 0 && (
@@ -183,38 +198,47 @@ export function AiInspector({
         ))}
       </div>
 
-      <div className="queue-list">
-        <div className="panel-title">
+      <Card className="queue-list-card" variant="secondary">
+        <Card.Header className="panel-title">
           <Send size={16} />
           {t("ai.executionList")}
-        </div>
-        {activeQueue.length === 0 && <p className="muted">{t("ai.noQueued")}</p>}
-        {activeQueue.map((item) => (
-          <div className="queue-item" key={item.id}>
-            <code>{item.command}</code>
-            <span className={`risk ${item.riskLevel}`}>
-              {riskLabel[item.riskLevel]}
-            </span>
-            <div className="queue-actions">
-              <button
-                className="mini-button"
-                disabled={item.status !== "pending"}
-                onClick={() => onExecuteQueueItem(item)}
-              >
-                <Play size={13} />
-                {t("ai.execute")}
-              </button>
-              <button
-                className="icon-button"
-                title={t("ai.cancel")}
-                onClick={() => onCancelQueueItem(item.id)}
-              >
-                <X size={13} />
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
+        </Card.Header>
+        <Card.Content className="queue-list">
+          {activeQueue.length === 0 && (
+            <p className="muted">{t("ai.noQueued")}</p>
+          )}
+          {activeQueue.map((item) => (
+            <Card className="queue-item" key={item.id} variant="default">
+              <Card.Content className="queue-item-content">
+                <code>{item.command}</code>
+                <span className={`risk ${item.riskLevel}`}>
+                  {riskLabel[item.riskLevel]}
+                </span>
+                <div className="queue-actions">
+                  <Button
+                    isDisabled={item.status !== "pending"}
+                    size="sm"
+                    variant="outline"
+                    onPress={() => onExecuteQueueItem(item)}
+                  >
+                    <Play size={13} />
+                    {t("ai.execute")}
+                  </Button>
+                  <Button
+                    aria-label={t("ai.cancel")}
+                    isIconOnly
+                    size="sm"
+                    variant="ghost"
+                    onPress={() => onCancelQueueItem(item.id)}
+                  >
+                    <X size={13} />
+                  </Button>
+                </div>
+              </Card.Content>
+            </Card>
+          ))}
+        </Card.Content>
+      </Card>
     </aside>
   );
 }

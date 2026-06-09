@@ -1,3 +1,4 @@
+import { Button } from "@heroui/react";
 import { Download, Server, Settings, TerminalSquare } from "lucide-react";
 import type { ConnectionProfile } from "../types";
 
@@ -14,17 +15,19 @@ export function ConnectionRow({
 }) {
   return (
     <div className="connection-row">
-      <button onClick={onConnect}>
+      <Button fullWidth size="sm" variant="ghost" onPress={onConnect}>
         <Server size={15} />
         <span>{profile.name}</span>
-      </button>
-      <button
-        className="icon-button compact"
-        title={t("connections.edit")}
-        onClick={onEdit}
+      </Button>
+      <Button
+        aria-label={t("connections.edit")}
+        isIconOnly
+        size="sm"
+        variant="ghost"
+        onPress={onEdit}
       >
         <Settings size={13} />
-      </button>
+      </Button>
     </div>
   );
 }
@@ -64,18 +67,18 @@ export function EmptyWorkspace({
       <h1>ShellPro</h1>
       <p>{t("workspace.startDescription")}</p>
       <div className="empty-actions">
-        <button className="primary-button" onClick={onLocal}>
+        <Button variant="primary" onPress={onLocal}>
           <TerminalSquare size={17} />
           {t("workspace.newLocal")}
-        </button>
-        <button className="secondary-button" onClick={onSsh}>
+        </Button>
+        <Button variant="outline" onPress={onSsh}>
           <Server size={17} />
           {t("workspace.newSsh")}
-        </button>
-        <button className="secondary-button" onClick={onImport}>
+        </Button>
+        <Button variant="outline" onPress={onImport}>
           <Download size={17} />
           {t("workspace.importConfig")}
-        </button>
+        </Button>
       </div>
     </div>
   );
