@@ -1,3 +1,4 @@
+import { Button } from "@heroui/react";
 import {
   ChevronDown,
   FilePlus2,
@@ -7,28 +8,23 @@ import {
   FolderPlus,
   FolderTree,
   Pencil,
+  RefreshCcw,
   Trash2,
   UploadCloud,
 } from "lucide-react";
-import { type DragEvent, type MouseEvent, useMemo } from "react";
+import { type DragEvent, type MouseEvent } from "react";
 import type { FileContextMenuState } from "../appTypes";
-import {
-  flattenFileEntries,
-  formatFileDate,
-  formatFileSize,
-  parentForFileAction,
-} from "../fileUtils";
+import { parentForFileAction } from "../fileUtils";
 import type {
   WorkspaceFileEntry,
   WorkspaceFileKind,
-  WorkspaceFilePreview,
 } from "../types";
 
 export function FileExplorer({
   entries,
   workspaceRoot,
+  scopeLabel,
   selectedPath,
-  preview,
   expandedDirPaths,
   dropTargetPath,
   isBusy,
@@ -37,6 +33,7 @@ export function FileExplorer({
   onContextMenu,
   onCreate,
   onUpload,
+  onRefresh,
   onDragOver,
   onDragLeave,
   onDrop,
@@ -44,8 +41,8 @@ export function FileExplorer({
 }: {
   entries: WorkspaceFileEntry[];
   workspaceRoot: string;
+  scopeLabel: string;
   selectedPath: string | null;
-  preview: WorkspaceFilePreview | null;
   expandedDirPaths: Record<string, boolean>;
   dropTargetPath: string | null;
   isBusy: boolean;
@@ -61,19 +58,12 @@ export function FileExplorer({
     kind: WorkspaceFileKind,
   ) => Promise<void>;
   onUpload: (parentPath: string | null) => void;
+  onRefresh: () => void;
   onDragOver: (event: DragEvent, parentPath: string | null) => void;
   onDragLeave: () => void;
   onDrop: (event: DragEvent, parentPath: string | null) => void;
   t: (key: string, values?: Record<string, string | number>) => string;
 }) {
-  const selectedEntry = useMemo(
-    () =>
-      flattenFileEntries(entries).find((entry) => entry.path === selectedPath) ??
-      null,
-    [entries, selectedPath],
-  );
-  const selectedChildCount = selectedEntry?.children?.length ?? 0;
-
   return (
     <section
       className="sidebar-section file-browser"
@@ -88,39 +78,54 @@ export function FileExplorer({
           {t("files.title")}
         </div>
         <div className="file-actions">
-          <button
-            className="icon-button compact"
-            title={t("files.newFile")}
-            onClick={(event) => {
-              event.stopPropagation();
+          <Button
+            aria-label={t("files.refresh")}
+            isDisabled={isBusy}
+            isIconOnly
+            size="sm"
+            variant="ghost"
+            onPress={() => {
+              onRefresh();
+            }}
+          >
+            <RefreshCcw size={13} />
+          </Button>
+          <Button
+            aria-label={t("files.newFile")}
+            isDisabled={isBusy}
+            isIconOnly
+            size="sm"
+            variant="ghost"
+            onPress={() => {
               void onCreate(null, "file");
             }}
-            disabled={isBusy}
           >
             <FilePlus2 size={13} />
-          </button>
-          <button
-            className="icon-button compact"
-            title={t("files.newFolder")}
-            onClick={(event) => {
-              event.stopPropagation();
+          </Button>
+          <Button
+            aria-label={t("files.newFolder")}
+            isDisabled={isBusy}
+            isIconOnly
+            size="sm"
+            variant="ghost"
+            onPress={() => {
               void onCreate(null, "directory");
             }}
-            disabled={isBusy}
           >
             <FolderPlus size={13} />
-          </button>
-          <button
-            className="icon-button compact"
-            title={t("files.upload")}
-            onClick={(event) => {
-              event.stopPropagation();
+          </Button>
+          <Button
+            aria-label={t("files.upload")}
+            isDisabled={isBusy}
+            isIconOnly
+            size="sm"
+            variant="ghost"
+            onPress={() => {
               onUpload(workspaceRoot || null);
             }}
-            disabled={isBusy}
           >
             <UploadCloud size={13} />
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -132,7 +137,8 @@ export function FileExplorer({
         }
       >
         <div className="file-root-label" title={workspaceRoot}>
-          {workspaceRoot || t("files.workspaceRoot")}
+          <strong>{scopeLabel}</strong>
+          <span>{workspaceRoot || t("files.workspaceRoot")}</span>
         </div>
         {entries.length === 0 ? (
           <p className="muted tight file-empty">{t("files.empty")}</p>
@@ -153,42 +159,6 @@ export function FileExplorer({
               onDrop={onDrop}
             />
           ))
-        )}
-      </div>
-
-      <div className="file-preview">
-        <div className="panel-title">
-          <FileText size={15} />
-          {t("files.preview")}
-        </div>
-        {!preview ? (
-          <p className="muted tight">{t("files.previewEmpty")}</p>
-        ) : (
-          <div className="file-preview-body">
-            <div className="file-preview-meta">
-              <strong>{preview.name}</strong>
-              <span>
-                {preview.kind === "directory"
-                  ? t("files.folderMeta", { count: selectedChildCount })
-                  : formatFileSize(preview.size)}
-              </span>
-              {formatFileDate(preview.modifiedAt) && (
-                <span>{formatFileDate(preview.modifiedAt)}</span>
-              )}
-            </div>
-            {preview.kind === "directory" ? (
-              <p className="muted tight">
-                {t("files.folderPreview", { count: selectedChildCount })}
-              </p>
-            ) : preview.content ? (
-              <pre>{preview.content}</pre>
-            ) : (
-              <p className="muted tight">{t("files.binaryPreview")}</p>
-            )}
-            {preview.truncated && (
-              <p className="muted tight">{t("files.previewTruncated")}</p>
-            )}
-          </div>
         )}
       </div>
     </section>
@@ -233,8 +203,17 @@ function FileTreeNode({
   );
 
   return (
-    <div className="file-node-wrap">
-      <button
+    <div
+      className="file-node-wrap"
+      onDragOver={(event) => {
+        onDragOver(event, targetDropPath);
+      }}
+      onDragLeave={onDragLeave}
+      onDrop={(event) => {
+        onDrop(event, targetDropPath);
+      }}
+    >
+      <Button
         className={[
           "file-node",
           selectedPath === entry.path ? "selected" : "",
@@ -242,21 +221,16 @@ function FileTreeNode({
         ]
           .filter(Boolean)
           .join(" ")}
+        fullWidth
+        size="sm"
         style={{ paddingLeft: 8 + level * 14 }}
-        onClick={(event) => {
-          event.stopPropagation();
+        variant="ghost"
+        onPress={() => {
           onSelect(entry);
         }}
         onContextMenu={(event) =>
           onContextMenu(event, entry, entry.parentPath ?? null)
         }
-        onDragOver={(event) => {
-          onDragOver(event, targetDropPath);
-        }}
-        onDragLeave={onDragLeave}
-        onDrop={(event) => {
-          onDrop(event, targetDropPath);
-        }}
       >
         <span
           className="file-disclosure"
@@ -280,7 +254,7 @@ function FileTreeNode({
           <FileText size={14} />
         )}
         <span>{entry.name}</span>
-      </button>
+      </Button>
       {isDirectory && isExpanded && childEntries.length > 0 && (
         <div className="file-children">
           {childEntries.map((child) => (
@@ -335,60 +309,69 @@ export function FileContextMenu({
       onClick={(event) => event.stopPropagation()}
       role="menu"
     >
-      <button
-        role="menuitem"
-        onClick={() => {
+      <Button
+        fullWidth
+        size="sm"
+        variant="ghost"
+        onPress={() => {
           onClose();
           void onCreate(state.entry, "file");
         }}
       >
         <FilePlus2 size={14} />
         {t("files.newFile")}
-      </button>
-      <button
-        role="menuitem"
-        onClick={() => {
+      </Button>
+      <Button
+        fullWidth
+        size="sm"
+        variant="ghost"
+        onPress={() => {
           onClose();
           void onCreate(state.entry, "directory");
         }}
       >
         <FolderPlus size={14} />
         {t("files.newFolder")}
-      </button>
-      <button
-        role="menuitem"
-        onClick={() => {
+      </Button>
+      <Button
+        fullWidth
+        size="sm"
+        variant="ghost"
+        onPress={() => {
           onClose();
           onUpload(uploadParent);
         }}
       >
         <UploadCloud size={14} />
         {t("files.upload")}
-      </button>
+      </Button>
       {entry && (
         <>
           <div className="context-menu-divider" />
-          <button
-            role="menuitem"
-            onClick={() => {
+          <Button
+            fullWidth
+            size="sm"
+            variant="ghost"
+            onPress={() => {
               onClose();
               void onRename(entry);
             }}
           >
             <Pencil size={14} />
             {t("files.rename")}
-          </button>
-          <button
-            className="danger"
-            role="menuitem"
-            onClick={() => {
+          </Button>
+          <Button
+            fullWidth
+            size="sm"
+            variant="danger-soft"
+            onPress={() => {
               onClose();
               void onDelete(entry);
             }}
           >
             <Trash2 size={14} />
             {t("files.delete")}
-          </button>
+          </Button>
         </>
       )}
     </div>

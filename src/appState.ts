@@ -19,7 +19,7 @@ export const defaultTerminalPreferences: TerminalPreferences = {
     "'SF Mono', 'JetBrains Mono', Menlo, Monaco, Consolas, monospace",
   fontSize: 13,
   scrollback: 5000,
-  theme: "system",
+  theme: "dark",
 };
 
 export const terminalFontOptions = [

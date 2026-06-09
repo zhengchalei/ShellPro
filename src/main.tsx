@@ -1,5 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import "../node_modules/@heroui/styles/dist/heroui.min.css";
 import App from "./App";
 import { I18nProvider } from "./i18n";
 

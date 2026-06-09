@@ -47,15 +47,7 @@ const lightTerminalTheme = {
 };
 
 function resolveTerminalTheme(preferences: TerminalPreferences) {
-  const systemPrefersDark =
-    typeof window !== "undefined" &&
-    window.matchMedia?.("(prefers-color-scheme: dark)").matches;
-  const theme =
-    preferences.theme === "system"
-      ? systemPrefersDark
-        ? "dark"
-        : "light"
-      : preferences.theme;
+  const theme = preferences.theme === "system" ? "dark" : preferences.theme;
   return theme === "dark" ? darkTerminalTheme : lightTerminalTheme;
 }
 

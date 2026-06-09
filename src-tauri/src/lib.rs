@@ -818,7 +818,10 @@ fn app_bootstrap(state: State<AppState>) -> Result<AppBootstrap, String> {
 }
 
 #[tauri::command]
-fn list_workspace_files(state: State<AppState>) -> Result<WorkspaceFileTree, String> {
+fn list_workspace_files(
+    state: State<AppState>,
+    _session_id: Option<String>,
+) -> Result<WorkspaceFileTree, String> {
     list_workspace(&state.workspace_root)
 }
 
@@ -826,6 +829,7 @@ fn list_workspace_files(state: State<AppState>) -> Result<WorkspaceFileTree, Str
 fn preview_workspace_file(
     state: State<AppState>,
     path: String,
+    _session_id: Option<String>,
 ) -> Result<WorkspaceFilePreview, String> {
     let path = resolve_workspace_path(&state.workspace_root, Some(path))?;
     let metadata =
@@ -858,6 +862,22 @@ fn preview_workspace_file(
         content,
         truncated,
     })
+}
+
+#[tauri::command]
+fn save_workspace_file(
+    state: State<AppState>,
+    path: String,
+    content: String,
+    _session_id: Option<String>,
+) -> Result<(), String> {
+    let target = resolve_workspace_path(&state.workspace_root, Some(path))?;
+    let metadata =
+        fs::metadata(&target).map_err(|error| format!("Could not read file metadata: {error}"))?;
+    if !metadata.is_file() {
+        return Err("Only files can be saved from the editor.".to_string());
+    }
+    fs::write(&target, content).map_err(|error| format!("Could not save file: {error}"))
 }
 
 #[tauri::command]
@@ -1770,6 +1790,7 @@ pub fn run() {
             app_bootstrap,
             list_workspace_files,
             preview_workspace_file,
+            save_workspace_file,
             create_workspace_file,
             delete_workspace_file,
             rename_workspace_file,
