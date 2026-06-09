@@ -1199,6 +1199,10 @@ function App() {
     }));
   }
 
+  function fileSessionIdForScope(scopeId: string) {
+    return scopeId === workspaceFileScopeId ? null : scopeId;
+  }
+
   function updateExpandedDirPaths(
     scopeId: string,
     updater: (current: Record<string, boolean>) => Record<string, boolean>,
@@ -1239,7 +1243,7 @@ function App() {
     try {
       const preview = await shellProApi.previewWorkspaceFile(
         entry.path,
-        scopeId === workspaceFileScopeId ? null : scopeId,
+        fileSessionIdForScope(scopeId),
       );
       setFileEditorTabs((current) =>
         current.map((tab) =>
@@ -1306,11 +1310,11 @@ function App() {
       await shellProApi.saveWorkspaceFile(
         tab.path,
         tab.content,
-        tab.sessionId === workspaceFileScopeId ? null : tab.sessionId,
+        fileSessionIdForScope(tab.sessionId),
       );
       const preview = await shellProApi.previewWorkspaceFile(
         tab.path,
-        tab.sessionId === workspaceFileScopeId ? null : tab.sessionId,
+        fileSessionIdForScope(tab.sessionId),
       );
       setFileEditorTabs((current) =>
         current.map((item) =>
@@ -1329,7 +1333,7 @@ function App() {
         ),
       );
       await refreshFileTree(
-        tab.sessionId === workspaceFileScopeId ? null : tab.sessionId,
+        fileSessionIdForScope(tab.sessionId),
       );
       setStatusMessage(t("files.editorSavedName", { name: tab.name }));
     } catch (error) {
@@ -1386,7 +1390,12 @@ function App() {
 
     setIsFileBusy(true);
     try {
-      await shellProApi.createWorkspaceFile(parentPath, name, kind);
+      await shellProApi.createWorkspaceFile(
+        parentPath,
+        name,
+        kind,
+        fileSessionIdForScope(activeFileScopeId),
+      );
       if (parentPath) {
         updateExpandedDirPaths(activeFileScopeId, (current) => ({
           ...current,
@@ -1394,7 +1403,7 @@ function App() {
         }));
       }
       await refreshFileTree(
-        activeFileScopeId === workspaceFileScopeId ? null : activeFileScopeId,
+        fileSessionIdForScope(activeFileScopeId),
       );
       setStatusMessage(t("files.created", { name }));
     } catch (error) {
@@ -1411,7 +1420,10 @@ function App() {
 
     setIsFileBusy(true);
     try {
-      await shellProApi.deleteWorkspaceFile(entry.path);
+      await shellProApi.deleteWorkspaceFile(
+        entry.path,
+        fileSessionIdForScope(activeFileScopeId),
+      );
       if (selectedFilePath === entry.path) {
         setSelectedFilePathBySessionId((current) => ({
           ...current,
@@ -1427,7 +1439,7 @@ function App() {
         setActiveContentTab(activeFileScopeId, terminalContentTabId);
       }
       await refreshFileTree(
-        activeFileScopeId === workspaceFileScopeId ? null : activeFileScopeId,
+        fileSessionIdForScope(activeFileScopeId),
       );
       setStatusMessage(t("files.deleted", { name: entry.name }));
     } catch (error) {
@@ -1445,7 +1457,11 @@ function App() {
 
     setIsFileBusy(true);
     try {
-      const renamed = await shellProApi.renameWorkspaceFile(entry.path, newName);
+      const renamed = await shellProApi.renameWorkspaceFile(
+        entry.path,
+        newName,
+        fileSessionIdForScope(activeFileScopeId),
+      );
       if (selectedFilePath === entry.path) {
         setSelectedFilePathBySessionId((current) => ({
           ...current,
@@ -1472,7 +1488,7 @@ function App() {
         );
       }
       await refreshFileTree(
-        activeFileScopeId === workspaceFileScopeId ? null : activeFileScopeId,
+        fileSessionIdForScope(activeFileScopeId),
       );
       setStatusMessage(t("files.renamed", { name: newName }));
     } catch (error) {
@@ -1494,7 +1510,12 @@ function App() {
 
     setIsFileBusy(true);
     try {
-      await filesToUploads(parentPath, files, setStatusMessage);
+      await filesToUploads(
+        parentPath,
+        files,
+        setStatusMessage,
+        fileSessionIdForScope(activeFileScopeId),
+      );
       if (parentPath) {
         updateExpandedDirPaths(activeFileScopeId, (current) => ({
           ...current,
@@ -1502,7 +1523,7 @@ function App() {
         }));
       }
       await refreshFileTree(
-        activeFileScopeId === workspaceFileScopeId ? null : activeFileScopeId,
+        fileSessionIdForScope(activeFileScopeId),
       );
       setStatusMessage(t("files.uploaded", { count: files.length }));
     } catch (error) {

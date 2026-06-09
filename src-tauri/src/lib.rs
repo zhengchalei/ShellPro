@@ -47,6 +47,22 @@ struct TunnelProcess {
     child: Child,
 }
 
+fn ensure_workspace_session(state: &AppState, session_id: Option<&str>) -> Result<(), String> {
+    let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+
+    let terminals = state
+        .terminals
+        .lock()
+        .map_err(|_| "Could not lock terminal registry.".to_string())?;
+    if terminals.contains_key(session_id) {
+        Ok(())
+    } else {
+        Err("Workspace file access is tied to an open session.".to_string())
+    }
+}
+
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -820,8 +836,9 @@ fn app_bootstrap(state: State<AppState>) -> Result<AppBootstrap, String> {
 #[tauri::command]
 fn list_workspace_files(
     state: State<AppState>,
-    _session_id: Option<String>,
+    session_id: Option<String>,
 ) -> Result<WorkspaceFileTree, String> {
+    ensure_workspace_session(state.inner(), session_id.as_deref())?;
     list_workspace(&state.workspace_root)
 }
 
@@ -829,8 +846,9 @@ fn list_workspace_files(
 fn preview_workspace_file(
     state: State<AppState>,
     path: String,
-    _session_id: Option<String>,
+    session_id: Option<String>,
 ) -> Result<WorkspaceFilePreview, String> {
+    ensure_workspace_session(state.inner(), session_id.as_deref())?;
     let path = resolve_workspace_path(&state.workspace_root, Some(path))?;
     let metadata =
         fs::metadata(&path).map_err(|error| format!("Could not read file metadata: {error}"))?;
@@ -869,8 +887,9 @@ fn save_workspace_file(
     state: State<AppState>,
     path: String,
     content: String,
-    _session_id: Option<String>,
+    session_id: Option<String>,
 ) -> Result<(), String> {
+    ensure_workspace_session(state.inner(), session_id.as_deref())?;
     let target = resolve_workspace_path(&state.workspace_root, Some(path))?;
     let metadata =
         fs::metadata(&target).map_err(|error| format!("Could not read file metadata: {error}"))?;
@@ -886,7 +905,9 @@ fn create_workspace_file(
     parent_path: Option<String>,
     name: String,
     kind: WorkspaceFileKind,
+    session_id: Option<String>,
 ) -> Result<(), String> {
+    ensure_workspace_session(state.inner(), session_id.as_deref())?;
     let target = resolve_new_workspace_path(&state.workspace_root, parent_path, &name)?;
     if target.exists() {
         return Err("A file or folder with that name already exists.".to_string());
@@ -904,7 +925,12 @@ fn create_workspace_file(
 }
 
 #[tauri::command]
-fn delete_workspace_file(state: State<AppState>, path: String) -> Result<(), String> {
+fn delete_workspace_file(
+    state: State<AppState>,
+    path: String,
+    session_id: Option<String>,
+) -> Result<(), String> {
+    ensure_workspace_session(state.inner(), session_id.as_deref())?;
     let target = resolve_workspace_path(&state.workspace_root, Some(path))?;
     if target == state.workspace_root {
         return Err("Cannot delete the workspace root.".to_string());
@@ -924,7 +950,9 @@ fn rename_workspace_file(
     state: State<AppState>,
     path: String,
     new_name: String,
+    session_id: Option<String>,
 ) -> Result<WorkspaceFileEntry, String> {
+    ensure_workspace_session(state.inner(), session_id.as_deref())?;
     let target = resolve_workspace_path(&state.workspace_root, Some(path))?;
     if target == state.workspace_root {
         return Err("Cannot rename the workspace root.".to_string());
@@ -953,7 +981,9 @@ fn upload_workspace_files(
     state: State<AppState>,
     parent_path: Option<String>,
     paths: Vec<String>,
+    session_id: Option<String>,
 ) -> Result<(), String> {
+    ensure_workspace_session(state.inner(), session_id.as_deref())?;
     let parent = resolve_workspace_path(&state.workspace_root, parent_path)?;
     if !parent.is_dir() {
         return Err("Upload target must be a folder.".to_string());
@@ -982,7 +1012,9 @@ fn write_workspace_file(
     parent_path: Option<String>,
     name: String,
     bytes: Vec<u8>,
+    session_id: Option<String>,
 ) -> Result<(), String> {
+    ensure_workspace_session(state.inner(), session_id.as_deref())?;
     let target = resolve_new_workspace_path(&state.workspace_root, parent_path, &name)?;
     fs::write(&target, bytes).map_err(|error| format!("Could not write file: {error}"))
 }
@@ -1396,6 +1428,27 @@ fn close_session(state: State<AppState>, session_id: String) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_app_state() -> AppState {
+        AppState {
+            db_path: PathBuf::from("test.db"),
+            workspace_root: PathBuf::from("."),
+            terminals: Arc::new(Mutex::new(HashMap::new())),
+            tunnels: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    #[test]
+    fn workspace_file_access_requires_open_session_when_scoped() {
+        let state = test_app_state();
+
+        assert!(ensure_workspace_session(&state, None).is_ok());
+        assert!(ensure_workspace_session(&state, Some("")).is_ok());
+        assert_eq!(
+            ensure_workspace_session(&state, Some("missing-session")).unwrap_err(),
+            "Workspace file access is tied to an open session."
+        );
+    }
 
     #[test]
     fn redacts_common_secret_patterns() {
