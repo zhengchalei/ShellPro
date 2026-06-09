@@ -791,24 +791,36 @@ export const shellProApi = {
     parentPath: string | null,
     name: string,
     kind: WorkspaceFileEntry["kind"],
+    sessionId?: string | null,
   ) =>
     call<void>("create_workspace_file", {
       parentPath,
       name,
       kind,
+      sessionId,
     }),
 
-  deleteWorkspaceFile: (path: string) =>
-    call<void>("delete_workspace_file", { path }),
+  deleteWorkspaceFile: (path: string, sessionId?: string | null) =>
+    call<void>("delete_workspace_file", { path, sessionId }),
 
-  renameWorkspaceFile: (path: string, newName: string) =>
-    call<WorkspaceFileEntry>("rename_workspace_file", { path, newName }),
+  renameWorkspaceFile: (
+    path: string,
+    newName: string,
+    sessionId?: string | null,
+  ) => call<WorkspaceFileEntry>("rename_workspace_file", { path, newName, sessionId }),
 
-  uploadWorkspaceFiles: (parentPath: string | null, paths: string[]) =>
-    call<void>("upload_workspace_files", { parentPath, paths }),
+  uploadWorkspaceFiles: (
+    parentPath: string | null,
+    paths: string[],
+    sessionId?: string | null,
+  ) => call<void>("upload_workspace_files", { parentPath, paths, sessionId }),
 
-  writeWorkspaceFile: (parentPath: string | null, name: string, bytes: number[]) =>
-    call<void>("write_workspace_file", { parentPath, name, bytes }),
+  writeWorkspaceFile: (
+    parentPath: string | null,
+    name: string,
+    bytes: number[],
+    sessionId?: string | null,
+  ) => call<void>("write_workspace_file", { parentPath, name, bytes, sessionId }),
 
   saveProfile: (input: ConnectionProfileInput) =>
     call<ConnectionProfile>("save_profile", { input }),

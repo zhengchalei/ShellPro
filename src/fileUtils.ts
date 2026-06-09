@@ -55,19 +55,20 @@ export async function filesToUploads(
   parentPath: string | null,
   files: File[],
   onStatus: (message: string) => void,
+  sessionId?: string | null,
 ) {
   const paths = files
     .map((file) => (file as File & { path?: string }).path)
     .filter((path): path is string => Boolean(path));
 
   if (paths.length === files.length && paths.length > 0) {
-    await shellProApi.uploadWorkspaceFiles(parentPath, paths);
+    await shellProApi.uploadWorkspaceFiles(parentPath, paths, sessionId);
     return;
   }
 
   for (const file of files) {
     const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
-    await shellProApi.writeWorkspaceFile(parentPath, file.name, bytes);
+    await shellProApi.writeWorkspaceFile(parentPath, file.name, bytes, sessionId);
     onStatus(`${file.name} uploaded`);
   }
 }
